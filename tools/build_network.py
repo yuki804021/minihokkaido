@@ -521,8 +521,28 @@ for sid, name, path in (('sapporo_tram_out', '外回り', loop), ('sapporo_tram_
                      'bands': [['06:30', '23:00', 8]]})
 
 # 函館市電: 時刻表データ (GTFS) の便ごとの時刻で走らせる。取得できなければ推計ダイヤ
-HAKODATE_GTFS_URL = 'https://api-public.odpt.org/api/v4/files/odpt/HakodateCity/Alllines.zip?date=20260815'
+# ファイルの URL はダイヤ改正ごとに date が変わるので、ダウンロードするときにデータセットのページから最新のものを探す
+HAKODATE_DATASET = 'https://ckan.odpt.org/dataset/hakodate_city_alllines'
+HAKODATE_GTFS_URL = 'https://api-public.odpt.org/api/v4/files/odpt/HakodateCity/Alllines.zip?date=20260815'  # 見つからないとき
 CREDITS = []
+
+
+def latest_hakodate_url():
+    import re
+
+    def get(url):
+        with urllib.request.urlopen(url, timeout=30) as r:
+            return r.read().decode('utf-8', 'replace')
+    try:
+        found = set()
+        for res in set(re.findall(r'/dataset/hakodate_city_alllines/resource/[0-9a-f-]+', get(HAKODATE_DATASET))):
+            found |= set(re.findall(r'https://api-public\.odpt\.org/api/v4/files/odpt/HakodateCity/Alllines\.zip\?date=\d{8}',
+                                    get('https://ckan.odpt.org' + res)))
+        if found:
+            return max(found, key=lambda u: u[-8:])
+    except OSError as e:
+        print('  函館市電のデータセットのページを読めないため、既定の URL を使う:', e)
+    return HAKODATE_GTFS_URL
 
 with open(os.path.join(HERE, 'holidays.json'), encoding='utf-8') as f:
     HOLIDAYS = set(json.load(f))
@@ -631,8 +651,9 @@ def hakodate_color(rname, route):
 hakodate_zip = os.path.join(CACHE, 'hakodate_tram_gtfs.zip')
 try:
     if not os.path.exists(hakodate_zip):
-        print('download', HAKODATE_GTFS_URL)
-        urllib.request.urlretrieve(HAKODATE_GTFS_URL, hakodate_zip)
+        url = latest_hakodate_url()
+        print('download', url)
+        urllib.request.urlretrieve(url, hakodate_zip)
     # GTFS の系統名は ② ⑤、停留場名は「アリーナ前」(正式には 函館アリーナ前)
     hakodate = gtfs_services(hakodate_zip, ['hakodate_tram2', 'hakodate_tram5'], 'hakodate_gtfs', 'tram', TRAM, hakodate_color,
                              alias={'アリーナ前': '函館アリーナ前'},
