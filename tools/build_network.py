@@ -395,6 +395,9 @@ GROUPS = [
     {'id': 'jr', 'name': 'JR北海道 普通・快速'},
     {'id': 'jr_ltd', 'name': 'JR北海道 特急・北海道新幹線'},
     {'id': 'hokkaido_other', 'name': '道南いさりび鉄道'},
+    {'id': 'highway_bus', 'name': '都市間高速バス'},
+    # 路線バスは動かさず、路線図・停留所・時刻表のみ (data/bus_map.js、tools/build_bus.py で作る)
+    {'id': 'route_bus', 'name': '路線バス（路線図・停留所）', 'color': '#8D6E63'},
     {'id': 'ferry', 'name': 'フェリー・旅客船'},
     {'id': 'air', 'name': '航空便（推計）'},
 ]
@@ -670,6 +673,87 @@ else:
             TRAM, bands=[['06:30', '22:30', 16]])
     service('hakodate5', '5系統 湯の川〜函館どつく前', 'tram', 'hakodate_tram5', '#4FC3F7', [('hakodate_tram5', '湯の川', '函館どつく前')],
             TRAM, bands=[['06:30', '22:30', 12]], offset=6)
+
+# ------------------------------------------------------------------ 都市間高速バス
+# 北海道オープンデータプラットフォーム (HODA) の「高速バス」と、根室交通の札幌根室線の時刻表データ (GTFS) で走らせる。
+# 経路は、停留所を OpenStreetMap の道路 (OSRM) に沿ってつないだもの。路線バスは build_bus.py (地図と時刻表のみ)
+import sys  # noqa: E402
+sys.path.insert(0, HERE)
+import gtfs_util as gu  # noqa: E402
+
+HIGHWAY_LINES = []
+HIGHWAY_COLOR = '#E65100'
+BUS = {'kind': 'bus', 'cars': 1, 'carLength': 12, 'width': 2.5, 'height': 3.4, 'speed': 70, 'dwell': 20, 'accel': 20}
+NEMURO_GTFS_URL = 'https://api.gtfs-data.jp/v2/organizations/nemurokotsu/feeds/nemurobus/files/feed.zip'
+NEMURO_HIGHWAY_ROUTES = {'札幌線_R'}  # 根室交通のうち都市間高速バス (札幌根室線)
+
+
+def highway_services(zpath, prefix, keep_route=None):
+    g = gu.read_gtfs(zpath)
+    ref = gu.reference_dates()
+    run = gu.runs_on(g)
+    stops = {s['stop_id']: s for s in g['stops']}
+    routes = {r['route_id']: r for r in g['routes']}
+    agency = {a['agency_id']: a['agency_name'] for a in g['agency']}
+    times = gu.trips_by_id(g)
+    patterns = {}
+    for t in g['trips']:
+        route = routes[t['route_id']]
+        if keep_route and not keep_route(route):
+            continue
+        # 基準日 (次の平日・次の日祝) に走る便だけを使う (冬ダイヤなど、期間の違うダイヤが同じデータに入っているため)
+        days = [k for k in ('weekday', 'holiday') if run(t['service_id'], ref[k])]
+        st = times.get(t['trip_id'], [])
+        if not days or len(st) < 2:
+            continue
+        patterns.setdefault((t['route_id'], tuple(r['stop_id'] for r in st)), []).append((t, st, days))
+    out = []
+    for k, ((route_id, stop_ids), trips) in enumerate(sorted(patterns.items())):
+        route = routes[route_id]
+        names = [stops[s]['stop_name'] for s in stop_ids]
+        coords = [rnd([float(stops[s]['stop_lon']), float(stops[s]['stop_lat'])]) for s in stop_ids]
+        road = gu.road_route(coords)
+        vias = gu.split_at_stops(road, coords) if road else [[] for _ in coords[1:]]
+        vias = [gu.simplify([a] + v + [b], 20)[1:-1] for a, b, v in zip(coords, coords[1:], vias)]
+        rows = [[names[0], coords[0], 1]]
+        for n, c, v in zip(names[1:], coords[1:], vias):
+            rows.extend(['', p, 0] for p in v)
+            rows.append([n, c, 1])
+        seen, trip_rows = set(), []
+        for t, st, days in trips:
+            dep0 = gtfs_sec(st[0]['departure_time'] or st[0]['arrival_time'])
+            tt = [[gtfs_sec(r['arrival_time'] or r['departure_time']) - dep0,
+                   gtfs_sec(r['departure_time'] or r['arrival_time']) - dep0] for r in st]
+            key = (dep0, json.dumps(tt), tuple(days))
+            if key in seen:
+                continue
+            seen.add(key)
+            trip_rows.append({'dep': dep0, 't': tt, 'days': days})
+        trip_rows.sort(key=lambda x: x['dep'])
+        long_name = route.get('route_long_name') or route.get('route_short_name') or f'{names[0]}〜{names[-1]}'
+        op = agency.get(route.get('agency_id'), '')
+        sid = f'{prefix}{k}'
+        out.append({**BUS, 'id': sid, 'name': f'高速バス {long_name}', 'group': 'highway_bus', 'line': sid,
+                    'color': HIGHWAY_COLOR, 'loop': False, 'both': False, 'offset': 0, 'path': rows, 'trips': trip_rows,
+                    'note': f'運行: {op}' if op else ''})
+        HIGHWAY_LINES.append({'id': sid, 'name': f'高速バス {long_name}', 'operator': op, 'group': 'highway_bus', 'kind': 'bus',
+                              'color': HIGHWAY_COLOR, 'stations': [[n, c] for n, c in zip(names, coords)],
+                              'shape': [r[1] for r in rows]})
+    return out
+
+
+try:
+    hoda = dict(gu.hoda_resources())
+    hwy_url = next(u for n, u in hoda.items() if n.startswith('高速バス'))
+    highway = highway_services(gu.fetch(hwy_url, 'hoda_highway_bus.zip'), 'hwy')
+    highway += highway_services(gu.fetch(NEMURO_GTFS_URL, 'nemuro_bus.zip'), 'hwy_nemuro',
+                                keep_route=lambda r: r['route_id'] in NEMURO_HIGHWAY_ROUTES)
+    services.extend(highway)
+    CREDITS.append('北海道オープンデータプラットフォーム 高速バス GTFS')
+    CREDITS.append('根室交通 GTFS')
+    print(f'  都市間高速バス: {len(highway)} 系統、{sum(len(s["trips"]) for s in highway)} 便')
+except (OSError, StopIteration) as e:
+    print('  都市間高速バスの時刻表データを取得できないため、高速バスは表示しない:', e)
 
 # JR北海道 普通・快速 (運転間隔はすべて推計)
 LOCALS = [
@@ -1262,6 +1346,7 @@ for ap in AIRPORTS:
 lines_out = [{'id': lid, 'name': name, 'operator': op, 'group': grp, 'kind': kind, 'color': color,
               'stations': [[n, c] for n, c in sts], 'shape': shape_of(lid)} for lid, name, op, grp, kind, color, sts in LINES]
 lines_out += FERRY_LINES
+lines_out += HIGHWAY_LINES
 
 with open(os.path.join(HERE, 'holidays.json'), encoding='utf-8') as f:
     holidays = json.load(f)

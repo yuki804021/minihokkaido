@@ -110,8 +110,10 @@
         : NET.trackSource ? [`線路: ${NET.trackSource}`] : []),
       '駅の並び: <a href="https://ekidata.jp/" target="_blank">駅データ.jp</a>',
       ...(NET.credits && NET.credits.length
-        // ライセンスはデータごとに異なる (函館市電は GTFS-RU ライセンス) ので、詳しくは DATA_SOURCES.md に書く
-        ? [`時刻表（GTFS）: ${NET.credits.map(c => c.replace(/（.*?）/, '').replace(/\s*GTFS$/, '')).join('・')}（<a href="https://www.odpt.org/" target="_blank">公共交通オープンデータセンター</a>）`] : []),
+        // ライセンスはデータごとに異なる (函館市電は GTFS-RU ライセンス、高速バスは CC BY) ので、詳しくは DATA_SOURCES.md に書く
+        ? [`時刻表（GTFS）: ${NET.credits.map(c => c.replace(/（.*?）/, '').replace(/\s*GTFS$/, '')).join('・')}`] : []),
+      ...(window.BUS_MAP
+        ? ['路線バス: 「<a href="https://nlftp.mlit.go.jp/ksj/" target="_blank">国土数値情報</a>（バス停留所・バスルート）」を加工して作成、時刻表は<a href="https://ckan.hoda.jp/dataset/gtfs-data" target="_blank">北海道オープンデータプラットフォーム</a>ほか（GTFS）'] : []),
       '空港: 国土数値情報・国土交通省「空港管理状況調書」',
       '航路: 概略',
       'その他の時刻は推計',
@@ -180,6 +182,19 @@
     map.addSource('terrain', { type: 'raster-dem', tiles: [TERRAIN_TILES], encoding: 'terrarium', tileSize: 256, maxzoom: 14 });
     applyTerrain();
 
+    // 路線バスの路線図 (線路より下に、細く描く)
+    const BUS_COLOR = dark ? '#c9a58f' : '#8d6e63';
+    map.addSource('bus-routes', { type: 'geojson', data: busRoutesGeoJSON() });
+    map.addLayer({
+      id: 'bus-routes', type: 'line', source: 'bus-routes', minzoom: 8,
+      layout: { 'line-cap': 'round', 'line-join': 'round' },
+      paint: {
+        'line-color': BUS_COLOR,
+        'line-width': ['interpolate', ['linear'], ['zoom'], 8, 0.5, 12, 1.2, 16, 2.5],
+        'line-opacity': ['interpolate', ['linear'], ['zoom'], 8, 0.35, 13, 0.7],
+      },
+    });
+
     // 線路
     map.addSource('tracks', { type: 'geojson', data: tracksGeoJSON() });
     map.addLayer({
@@ -188,7 +203,7 @@
       paint: {
         'line-color': dark ? '#000' : '#fff',
         'line-width': ['interpolate', ['linear'], ['zoom'], 7, 2.5, 12, 4, 16, 9],
-        'line-opacity': 0.7,
+        'line-opacity': ['case', ['==', ['get', 'kind'], 'bus'], 0, 0.7], // 高速バスは縁取りなし
       },
     });
     map.addLayer({
@@ -196,7 +211,12 @@
       layout: { 'line-cap': 'round', 'line-join': 'round' },
       paint: {
         'line-color': ['get', 'color'],
-        'line-width': ['interpolate', ['linear'], ['zoom'], 7, 1.2, 12, 2.5, 16, 5],
+        // 高速バスは道路を走り、札幌の中心部で何本も重なるので、細く半透明にする
+        'line-width': ['interpolate', ['linear'], ['zoom'],
+          7, ['case', ['==', ['get', 'kind'], 'bus'], 0.8, 1.2],
+          12, ['case', ['==', ['get', 'kind'], 'bus'], 1.2, 2.5],
+          16, ['case', ['==', ['get', 'kind'], 'bus'], 2, 5]],
+        'line-opacity': ['case', ['==', ['get', 'kind'], 'bus'], 0.55, 1],
       },
     });
 
@@ -224,9 +244,40 @@
           'circle-color': dark ? '#1b1f27' : '#ffffff',
           'circle-stroke-color': ['get', 'color'],
           'circle-stroke-width': ['interpolate', ['linear'], ['zoom'], 8, 1, 16, 2.5],
+          // 高速バスの停留所は数が多いので、広域では出さない
+          'circle-opacity': ['step', ['zoom'], ['case', ['==', ['get', 'kind'], 'bus'], 0, 1], 9.5, 1],
+          'circle-stroke-opacity': ['step', ['zoom'], ['case', ['==', ['get', 'kind'], 'bus'], 0, 1], 9.5, 1],
         },
       });
     }
+    // 路線バスの停留所 (拡大時のみ)。クリックで時刻表
+    map.addSource('bus-stops', { type: 'geojson', data: busStopsGeoJSON() });
+    map.addLayer({
+      id: 'bus-stops', type: 'circle', source: 'bus-stops', minzoom: 13,
+      paint: {
+        'circle-radius': ['interpolate', ['linear'], ['zoom'], 13, 2, 16, 5],
+        'circle-color': dark ? '#1b1f27' : '#ffffff',
+        'circle-stroke-color': BUS_COLOR,
+        'circle-stroke-width': ['interpolate', ['linear'], ['zoom'], 13, 1, 16, 2],
+      },
+    });
+    map.addSource('bus-stop-label-data', { type: 'geojson', data: busStopsGeoJSON() });
+    map.addLayer({
+      id: 'bus-stop-labels', type: 'symbol', source: 'bus-stop-label-data', minzoom: 15.5,
+      layout: {
+        'text-field': ['get', 'name'],
+        'text-font': ['Noto Sans Regular'],
+        'text-size': 11,
+        'text-offset': [0, 0.9],
+        'text-anchor': 'top',
+        'text-optional': true,
+      },
+      paint: {
+        'text-color': dark ? '#d8c3b6' : '#5d4037',
+        'text-halo-color': dark ? '#0b0e13' : '#ffffff',
+        'text-halo-width': 1.2,
+      },
+    });
     map.addSource('station-label-data', { type: 'geojson', data: stationsGeoJSON() });
     for (const kind of ['rail', 'tram']) {
       map.addLayer({
@@ -380,6 +431,22 @@
     return { type: 'FeatureCollection', features };
   }
 
+  const BUS = window.BUS_MAP || { operators: [], routeNames: [], stops: [], lines: [], timetables: [], ttStops: [] };
+
+  function busRoutesGeoJSON() {
+    return {
+      type: 'FeatureCollection',
+      features: BUS.lines.map(([op, coords]) => ({ type: 'Feature', properties: { op }, geometry: { type: 'LineString', coordinates: coords } })),
+    };
+  }
+
+  function busStopsGeoJSON() {
+    return {
+      type: 'FeatureCollection',
+      features: BUS.stops.map(([name, c], i) => ({ type: 'Feature', properties: { i, name }, geometry: { type: 'Point', coordinates: c } })),
+    };
+  }
+
   function stationsGeoJSON() {
     const seen = new Map();
     for (const l of NET.lines) {
@@ -410,6 +477,9 @@
     map.setFilter('tracks', ['all', f, notShip]);
     map.setFilter('tracks-casing', ['all', f, notShip]);
     map.setFilter('ferry-routes', ['all', f, ['==', ['get', 'kind'], 'ship']]);
+    for (const id of ['bus-routes', 'bus-stops', 'bus-stop-labels']) {
+      map.setLayoutProperty(id, 'visibility', state.groups.route_bus ? 'visible' : 'none');
+    }
     const inGroups = ['any', ...[...lineGroups].map(g => ['in', `,${g},`, ['get', 'groups']])];
     for (const kind of ['rail', 'tram']) {
       // 'rail' のレイヤーには鉄道の駅と港を、'tram' のレイヤーには電停を出す
@@ -742,6 +812,13 @@
     map.on('mouseenter', layer, () => { map.getCanvas().style.cursor = 'pointer'; });
     map.on('mouseleave', layer, () => { map.getCanvas().style.cursor = ''; });
   }
+  map.on('click', 'bus-stops', e => {
+    if (e.defaultPrevented) return;
+    e.preventDefault();
+    openBusStop(e.features[0].properties.i);
+  });
+  map.on('mouseenter', 'bus-stops', () => { map.getCanvas().style.cursor = 'pointer'; });
+  map.on('mouseleave', 'bus-stops', () => { map.getCanvas().style.cursor = ''; });
   for (const layer of ['stations-rail', 'stations-tram']) {
     map.on('click', layer, e => {
       if (e.defaultPrevented) return;
@@ -1193,6 +1270,12 @@
     }
     box.hidden = false;
     document.getElementById('station-name').textContent = state.station.name;
+    document.getElementById('station-reach').hidden = !!state.station.bus;
+    document.getElementById('station-kicker').textContent = state.station.bus ? 'バス停の時刻表' : '発車案内';
+    if (state.station.bus) {
+      renderBusStop();
+      return;
+    }
     const t = ((simTime() % 86400) + 86400) % 86400;
     const deps = sim.departuresAt(state.station.name, state.station.c, t, {
       limit: 8, isVisible: sv => state.groups[sv.group],
@@ -1210,6 +1293,7 @@
         `${shortName(d.service)} ${destinationOf(d.pattern)}${d.first ? '（始発）' : ''}`;
       return li;
     }));
+    document.getElementById('station-empty').textContent = '3 時間以内に発車する列車はありません。';
     document.getElementById('station-empty').hidden = deps.length > 0;
     // 時刻の出どころ (時刻表データか推計か) を明記する
     const real = deps.filter(d => d.pattern.tripSegs).length;
@@ -1275,6 +1359,7 @@
   for (const g of NET.groups) {
     const services = NET.services.filter(s => s.group === g.id);
     const colors = [...new Set(services.map(s => s.color))].slice(0, 6);
+    if (!colors.length && g.color) colors.push(g.color); // 路線バス (動かさない) は群の色
     const label = document.createElement('label');
     label.className = 'legend-item';
     label.innerHTML = `<input type="checkbox" checked>
@@ -1653,6 +1738,95 @@
     if (state.airport) renderAirportFlights();
   });
   document.getElementById('now').addEventListener('click', () => { if (live.on) pollLive(); });
+
+  // ---------------------------------------------------------------- 路線バスの停留所と時刻表
+  // 路線バスは動かさず、停留所をクリックしたときに時刻表データ (data/bus/*.json) を読み込んで、この先の発車時刻を出す
+  const busTables = new Map(); // 読み込んだ時刻表 (ファイル番号 → データ または Promise)
+  // 停留所名の表記ゆれを揃える (全角・半角、ヶ、空白、漢数字: 大通西三丁目 → 大通西3丁目)
+  const kanjiNum = k => {
+    let n = 0, cur = 0;
+    for (const ch of k) {
+      if (ch === '十') { n += (cur || 1) * 10; cur = 0; } else cur = '〇一二三四五六七八九'.indexOf(ch);
+    }
+    return String(n + cur);
+  };
+  const normName = n => n.normalize('NFKC').replace(/ヶ/g, 'ケ').replace(/[\s\u3000]/g, '').replace(/[〇一二三四五六七八九十]+/g, kanjiNum);
+
+  function loadBusTable(k) {
+    if (!busTables.has(k)) {
+      busTables.set(k, fetch(BUS.timetables[k].file).then(r => r.json()).then(d => { busTables.set(k, d); return d; })
+        .catch(() => { busTables.delete(k); return null; }));
+    }
+    return busTables.get(k);
+  }
+
+  // 同じ名前で 300m 以内 (または名前が違っても 40m 以内) の、時刻表データの停留所
+  function busTimetableStops(name, c) {
+    const n = normName(name);
+    return BUS.ttStops.filter(([tn, tc]) => {
+      const d = Sim.haversine(c, tc);
+      return d < 40 || (d < 300 && normName(tn) === n);
+    });
+  }
+
+  function openBusStop(i) {
+    const [name, c, ops, routes] = BUS.stops[i];
+    state.airport = null;
+    renderAirport();
+    state.selected = null;
+    live.selected = null;
+    state.follow = false;
+    renderInfo();
+    const tt = busTimetableStops(name, c);
+    state.station = { name, c, bus: { ops: ops.map(o => BUS.operators[o]), routes: routes.map(r => BUS.routeNames[r]), tt } };
+    renderStation();
+    Promise.all(tt.map(([, , k]) => loadBusTable(k))).then(() => { if (state.station && state.station.name === name) renderStation(); });
+  }
+
+  // 今日のダイヤの種類: 1 平日 2 土曜 4 日祝 (「土休日ダイヤ」に切り替えたときは、今日が土曜なら土曜、それ以外は日祝)
+  function busDayBit() {
+    if (sim.dayType === 'weekday') return 1;
+    const d = new Date(Date.now() + 9 * 3600 * 1000);
+    return d.getUTCDay() === 6 && sim.dayTypeOf(todayYmd) === 'holiday' && !(NET.calendar.holidays || []).includes(todayYmd) ? 2 : 4;
+  }
+
+  function renderBusStop() {
+    const b = state.station.bus;
+    const now = Math.floor((((simTime() % 86400) + 86400) % 86400) / 60);
+    const bit = busDayBit();
+    const rows = [];
+    let loading = false;
+    for (const [, , k, si] of b.tt) {
+      const t = busTables.get(k);
+      if (!t || t instanceof Promise) { loading = true; continue; }
+      for (const [m, r, h, mask] of t.stops[si][2]) {
+        if (!(mask & bit)) continue;
+        const wait = ((m - now) % 1440 + 1440) % 1440;
+        if (wait > 180) continue;
+        rows.push({ m, wait, route: t.routes[r], head: t.heads[h], op: t.op });
+      }
+    }
+    rows.sort((x, y) => x.wait - y.wait);
+    const list = document.getElementById('station-deps');
+    list.replaceChildren(...rows.slice(0, 8).map(d => {
+      const li = document.createElement('li');
+      li.innerHTML = `<span class="dep-time">${String(Math.floor(d.m / 60) % 24).padStart(2, '0')}:${String(d.m % 60).padStart(2, '0')}</span>
+        <i class="dep-swatch"></i><span class="dep-name"></span>
+        <span class="dep-wait">${d.wait === 0 ? 'まもなく' : `${d.wait}分後`}</span>`;
+      li.querySelector('.dep-swatch').style.background = '#8d6e63';
+      li.querySelector('.dep-name').textContent = `${d.route ? `${d.route} ` : ''}${d.head} 行`;
+      li.title = d.op;
+      return li;
+    }));
+    const empty = document.getElementById('station-empty');
+    empty.hidden = rows.length > 0 || loading;
+    empty.textContent = b.tt.length ? '3 時間以内に発車するバスはありません。' : 'この停留所の時刻表データはありません。';
+    const ops = b.ops.join('・');
+    const routes = b.routes.length ? `路線: ${b.routes.slice(0, 6).join('、')}${b.routes.length > 6 ? ` ほか ${b.routes.length - 6}` : ''}。` : '';
+    const day = { 1: '平日', 2: '土曜', 4: '日祝' }[bit];
+    document.getElementById('station-source').textContent = loading ? '時刻表を読み込み中…'
+      : `${ops ? `${ops}。` : ''}${routes}${b.tt.length ? `発車時刻は事業者の時刻表データ（GTFS、${day}のダイヤ）です。` : ''}路線バスは地図上では動きません。`;
+  }
 
   // ---------------------------------------------------------------- 平日 / 土休日ダイヤ
   const dayBtn = document.getElementById('daytype');
