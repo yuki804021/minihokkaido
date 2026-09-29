@@ -110,7 +110,8 @@
       ...(NET.credits && NET.credits.length
         // ライセンスはデータごとに異なる (函館市電は GTFS-RU ライセンス) ので、詳しくは DATA_SOURCES.md に書く
         ? [`時刻表（GTFS）: ${NET.credits.map(c => c.replace(/（.*?）/, '').replace(/\s*GTFS$/, '')).join('・')}（<a href="https://www.odpt.org/" target="_blank">公共交通オープンデータセンター</a>）`] : []),
-      '航路・空港: 概略',
+      '空港: 国土数値情報・国土交通省「空港管理状況調書」',
+      '航路: 概略',
       'その他の時刻は推計',
       '<a href="DATA_SOURCES.md" target="_blank">データ出典</a>',
     ].join(' | '),

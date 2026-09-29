@@ -14,6 +14,7 @@ import heapq
 import json
 import math
 import os
+import re
 import unicodedata
 import urllib.request
 import zipfile
@@ -888,22 +889,183 @@ ferry('ferry_okushiri', 'ハートランドフェリー（江差〜奥尻島）'
       [ESASHI, OKUSHIRI],
       MID, 130, departures=['12:30'], departures_return=['09:00'])
 
-# ------------------------------------------------------------------ 空港・航空便 (位置は概略、便数・時刻は推計)
+# ------------------------------------------------------------------ 空港・航空便 (便数・時刻は推計)
+# 空港の位置・敷地・滑走路・運用時間は「国土数値情報（空港データ C28、2021 年度）」、
+# 利用状況は国土交通省「空港管理状況調書」(令和 7 年、暦年・年度別) から取る。取得できなければ下の概略値を使う
+C28_URL = 'https://nlftp.mlit.go.jp/ksj/gml/data/C28/C28-21/C28-21_GML.zip'
+KANRI_URL = 'https://www.mlit.go.jp/koku/content/002016480.xlsx'        # 令和 7 年空港管理状況調書 (月別)
+KANRI_TREND_URL = 'https://www.mlit.go.jp/koku/content/002018023.xlsx'  # 暦年・年度別空港管理状況調書 (H28〜R7)
+STATS_YEAR = 2025
+
 AIRPORTS = [
-    # id, 名前, 座標, 滑走路の向き (真方位), 長さ, 運用時間
-    ('CTS', '新千歳空港', [141.6923, 42.7752], 1, 3000, ['0000', '2400']),
-    ('OKD', '丘珠空港', [141.3814, 43.1176], 131, 1500, ['0800', '2000']),
-    ('HKD', '函館空港', [140.8219, 41.7700], 111, 3000, ['0730', '2130']),
-    ('AKJ', '旭川空港', [142.4475, 43.6708], 151, 2500, ['0800', '2130']),
-    ('KUH', 'たんちょう釧路空港', [144.1929, 43.0410], 161, 2500, ['0800', '2130']),
-    ('OBO', 'とかち帯広空港', [143.2172, 42.7333], 161, 2500, ['0800', '2130']),
-    ('MMB', '女満別空港', [144.1642, 43.8806], 171, 2500, ['0800', '2130']),
-    ('SHB', '中標津空港', [144.9600, 43.5775], 71, 2000, ['0830', '2030']),
-    ('MBE', 'オホーツク紋別空港', [143.4042, 44.3039], 131, 2000, ['0830', '2030']),
-    ('WKJ', '稚内空港', [141.8008, 45.4042], 71, 2200, ['0830', '2030']),
-    ('RIS', '利尻空港', [141.1864, 45.2420], 61, 1800, ['0830', '1830']),
-    ('OIR', '奥尻空港', [139.4331, 42.0717], 131, 1500, ['0830', '1830']),
+    # id, 名前, 座標, 滑走路の向き (真方位), 長さ, 運用時間, 国土数値情報・空港管理状況調書での名前
+    ('CTS', '新千歳空港', [141.6923, 42.7752], 1, 3000, ['0000', '2400'], '新千歳空港', '新千歳'),
+    ('OKD', '丘珠空港', [141.3814, 43.1176], 131, 1500, ['0800', '2000'], '札幌飛行場', '札幌'),
+    ('HKD', '函館空港', [140.8219, 41.7700], 111, 3000, ['0730', '2130'], '函館空港', '函館'),
+    ('AKJ', '旭川空港', [142.4475, 43.6708], 151, 2500, ['0800', '2130'], '旭川空港', '旭川'),
+    ('KUH', 'たんちょう釧路空港', [144.1929, 43.0410], 161, 2500, ['0800', '2130'], '釧路空港', '釧路'),
+    ('OBO', 'とかち帯広空港', [143.2172, 42.7333], 161, 2500, ['0800', '2130'], '帯広空港', '帯広'),
+    ('MMB', '女満別空港', [144.1642, 43.8806], 171, 2500, ['0800', '2130'], '女満別空港', '女満別'),
+    ('SHB', '中標津空港', [144.9600, 43.5775], 71, 2000, ['0830', '2030'], '中標津空港', '中標津'),
+    ('MBE', 'オホーツク紋別空港', [143.4042, 44.3039], 131, 2000, ['0830', '2030'], '紋別空港', '紋別'),
+    ('WKJ', '稚内空港', [141.8008, 45.4042], 71, 2200, ['0830', '2030'], '稚内空港', '稚内'),
+    ('RIS', '利尻空港', [141.1864, 45.2420], 61, 1800, ['0830', '1830'], '利尻空港', '利尻'),
+    ('OIR', '奥尻空港', [139.4331, 42.0717], 131, 1500, ['0830', '1830'], '奥尻空港', '奥尻'),
 ]
+
+
+def fetch(url, name):
+    path = os.path.join(CACHE, name)
+    if not os.path.exists(path):
+        print('download', url)
+        urllib.request.urlretrieve(url, path)
+    return path
+
+
+def polygon_area(ring):
+    """おおよその面積 [m²] (平面近似)"""
+    lat0 = ring[0][1]
+    kx, ky = 111320 * math.cos(math.radians(lat0)), 110540
+    s = 0.0
+    for (x1, y1), (x2, y2) in zip(ring, ring[1:]):
+        s += (x1 * kx) * (y2 * ky) - (x2 * kx) * (y1 * ky)
+    return abs(s) / 2
+
+
+def long_axis(ring):
+    """敷地の形の長軸の向き (真方位 0〜180 度)。滑走路の向きとみなす"""
+    pts = densify(ring, 50)
+    lat0 = sum(p[1] for p in pts) / len(pts)
+    lon0 = sum(p[0] for p in pts) / len(pts)
+    kx, ky = 111320 * math.cos(math.radians(lat0)), 110540
+    xs = [(p[0] - lon0) * kx for p in pts]
+    ys = [(p[1] - lat0) * ky for p in pts]
+    sxx = sum(x * x for x in xs)
+    syy = sum(y * y for y in ys)
+    sxy = sum(x * y for x, y in zip(xs, ys))
+    theta = 0.5 * math.atan2(2 * sxy, sxx - syy)  # x 軸 (東) からの角度
+    return round((90 - math.degrees(theta)) % 180, 1)
+
+
+def load_c28():
+    """C28 の空港名 → 位置 (標点)・敷地・滑走路の長さ・運用時間"""
+    zpath = fetch(C28_URL, 'C28-21_GML.zip')
+    with zipfile.ZipFile(zpath) as z:
+        def geo(k):
+            with z.open(f'UTF-8/C28-21_{k}.geojson') as f:
+                return json.load(f)['features']
+        ref = {f['properties']['C28_000']: f['geometry']['coordinates'] for f in geo('AirportReferencePoint')}
+        out = {}
+        for f in geo('Airport'):
+            p = f['properties']
+            ring = f['geometry']['coordinates'][0]
+            cur = out.get(p['C28_005'])
+            # 敷地が複数に分かれている空港 (例: 稚内) は、いちばん大きいものを使う
+            if cur and polygon_area(cur['polygon']) >= polygon_area(ring):
+                continue
+            out[p['C28_005']] = {
+                'coord': [round(x, 6) for x in ref[p['C28_101'].lstrip('#')]],
+                'polygon': [rnd(c) for c in ring],
+                'runway': max(int(x) for x in p['C28_012'].split(',')),
+                'hours': [p['C28_009'], p['C28_010']],
+            }
+    return out
+
+
+def load_kanri():
+    """空港管理状況調書の空港名 → 利用状況 (年間・月別・10 年の推移)"""
+    import openpyxl
+
+    def sheet(path):
+        wb = openpyxl.load_workbook(path, read_only=True, data_only=True)
+        return list(wb[wb.sheetnames[-1]].iter_rows(values_only=True))
+
+    def blocks(rows):
+        """「空港名 ：」の行ごとに区切る"""
+        out, name = {}, None
+        for r in rows:
+            for j, c in enumerate(r):
+                if isinstance(c, str) and c.replace(' ', '').replace('　', '').startswith('空港名'):
+                    raw = next(x for x in r[j + 1:] if x)
+                    name = re.sub(r'（.*?）', '', raw).replace(' ', '').replace('　', '')
+                    out[name] = []
+                    break
+            else:
+                if name:
+                    out[name].append(r)
+        return out
+
+    monthly = blocks(sheet(fetch(KANRI_URL, 'kanri_r7.xlsx')))
+    trend = blocks(sheet(fetch(KANRI_TREND_URL, 'kanri_trend.xlsx')))
+    stats = {}
+    for name, rows in monthly.items():
+        # 列: 月・着陸 (国際・国内・計)・乗降客 (国際 乗/降/通過/計・国内 乗/降/計)・合計
+        mrows, total = [], None
+        for r in rows:
+            label = r[2] if len(r) > 2 else None
+            if isinstance(label, str) and re.fullmatch(r'\d{1,2}月', label) and total is None and len(mrows) < 12:
+                mrows.append((int(label[:-1]), r))
+            elif isinstance(label, str) and label.replace(' ', '') == '暦年計':
+                total = r
+                break
+        if total is None or len(mrows) != 12:
+            continue
+        num = lambda v: int(v or 0)
+        st = {'year': STATS_YEAR, 'passengers': num(total[13]), 'landings': num(total[5]),
+              'domestic': num(total[12]), 'international': num(total[9]),
+              'monthly': [{'month': m, 'passengers': num(r[13]), 'landings': num(r[5])} for m, r in mrows], 'trend': []}
+        # 暦年・年度別: 年 (H28〜R7) の行が暦年、続いて年度の行が並ぶ。暦年の 10 行を使う
+        era = {'28': 2016, '29': 2017, '30': 2018, '元': 2019}
+        for r in trend.get(name, []):
+            y = r[1] if len(r) > 1 else None
+            if y is None:
+                continue
+            y = str(y).strip()
+            year = era.get(y) or (2018 + int(y) if y.isdigit() and int(y) <= 20 else None)
+            if year and not any(t['year'] == year for t in st['trend']) and isinstance(r[12], (int, float)):
+                st['trend'].append({'year': year, 'passengers': int(r[12]), 'landings': int(r[4] or 0)})
+        st['trend'].sort(key=lambda t: t['year'])
+        stats[name] = st
+    return stats
+
+
+AIRPORT_INFO, AIRPORT_STATS = {}, {}
+try:
+    C28 = load_c28()
+    for ap in AIRPORTS:
+        code, name, c, hdg, runway, hours, c28_name, _ = ap
+        d = C28.get(c28_name)
+        if d is None:
+            print(f'  {name}: 国土数値情報（空港データ）に無いため概略値を使う')
+            continue
+        axis = long_axis(d['polygon'])
+        # 滑走路の向きは敷地の長軸。離着陸の向きは、概略値に近いほう (axis か axis+180) にする
+        diff = lambda a, b: abs((a - b + 180) % 360 - 180)
+        heading = axis if diff(axis, hdg) <= diff(axis + 180, hdg) else (axis + 180) % 360
+        # 敷地の形が滑走路と揃っていない空港 (新千歳・丘珠) は、長軸が滑走路からずれるので概略値を使う
+        if diff(heading, hdg) > 10:
+            print(f'  {name}: 敷地の長軸 {heading:.0f}° が滑走路の向き {hdg}° と {diff(heading, hdg):.0f}° ずれるため、滑走路の向きは概略値を使う')
+            heading = hdg
+        AIRPORT_INFO[code] = {**d, 'heading': round(heading, 1)}
+except OSError as e:
+    print('  国土数値情報（空港データ）を取得できないため、空港の位置は概略値を使う:', e)
+try:
+    KANRI = load_kanri()
+    for ap in AIRPORTS:
+        if ap[7] in KANRI:
+            AIRPORT_STATS[ap[0]] = KANRI[ap[7]]
+        else:
+            print(f'  {ap[1]}: 空港管理状況調書に無いため、利用状況は表示しない')
+except (OSError, ImportError) as e:
+    print('  空港管理状況調書を読めないため、利用状況は表示しない:', e)
+
+# 以降の航空便の計算は、国土数値情報の位置・向き・運用時間を使う
+AIRPORTS = [(code, name,
+             AIRPORT_INFO.get(code, {}).get('coord', c),
+             AIRPORT_INFO.get(code, {}).get('heading', hdg),
+             AIRPORT_INFO.get(code, {}).get('runway', runway),
+             AIRPORT_INFO.get(code, {}).get('hours', hours))
+            for code, name, c, hdg, runway, hours, _, _ in AIRPORTS]
 AP = {a[0]: a for a in AIRPORTS}
 
 DEST = {
@@ -1079,7 +1241,8 @@ for ap in AIRPORTS:
         if code in (a, b):
             routes.append({'dest': AP[b if code == a else a][1].replace('空港', ''), 'perDay': n, 'intl': False})
     airports.append({'id': code, 'name': name, 'coord': c, 'heading': hdg, 'runway': runway, 'hours': hours,
-                     'polygon': runway_polygon(ap), 'stats': None, 'routes': routes})
+                     'polygon': AIRPORT_INFO.get(code, {}).get('polygon') or runway_polygon(ap),
+                     'stats': AIRPORT_STATS.get(code), 'routes': routes})
 
 # ------------------------------------------------------------------ 出力
 lines_out = [{'id': lid, 'name': name, 'operator': op, 'group': grp, 'kind': kind, 'color': color,
