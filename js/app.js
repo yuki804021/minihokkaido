@@ -108,7 +108,8 @@
         : NET.trackSource ? [`線路: ${NET.trackSource}`] : []),
       '駅の並び: <a href="https://ekidata.jp/" target="_blank">駅データ.jp</a>',
       ...(NET.credits && NET.credits.length
-        ? [`時刻表（GTFS）: ${NET.credits.map(c => c.replace(/（.*?）/, '').replace(/\s*GTFS$/, '')).join('・')}（<a href="https://creativecommons.org/licenses/by/4.0/deed.ja" target="_blank">CC BY 4.0</a>）`] : []),
+        // ライセンスはデータごとに異なる (函館市電は GTFS-RU ライセンス) ので、詳しくは DATA_SOURCES.md に書く
+        ? [`時刻表（GTFS）: ${NET.credits.map(c => c.replace(/（.*?）/, '').replace(/\s*GTFS$/, '')).join('・')}（<a href="https://www.odpt.org/" target="_blank">公共交通オープンデータセンター</a>）`] : []),
       '航路・空港: 概略',
       'その他の時刻は推計',
       '<a href="DATA_SOURCES.md" target="_blank">データ出典</a>',

@@ -520,11 +520,134 @@ for sid, name, path in (('sapporo_tram_out', '外回り', loop), ('sapporo_tram_
                      'loop': True, 'both': False, 'offset': 0 if sid.endswith('out') else 3, 'path': path,
                      'bands': [['06:30', '23:00', 8]]})
 
-# 函館市電
-service('hakodate2', '2系統 湯の川〜谷地頭', 'tram', 'hakodate_tram2', '#E57373', [('hakodate_tram2', '湯の川', '谷地頭')],
-        TRAM, bands=[['06:30', '22:30', 16]])
-service('hakodate5', '5系統 湯の川〜函館どつく前', 'tram', 'hakodate_tram5', '#4FC3F7', [('hakodate_tram5', '湯の川', '函館どつく前')],
-        TRAM, bands=[['06:30', '22:30', 12]], offset=6)
+# 函館市電: 時刻表データ (GTFS) の便ごとの時刻で走らせる。取得できなければ推計ダイヤ
+HAKODATE_GTFS_URL = 'https://api-public.odpt.org/api/v4/files/odpt/HakodateCity/Alllines.zip?date=20260815'
+CREDITS = []
+
+with open(os.path.join(HERE, 'holidays.json'), encoding='utf-8') as f:
+    HOLIDAYS = set(json.load(f))
+
+
+def read_gtfs(zpath):
+    import csv
+    import io
+    with zipfile.ZipFile(zpath) as z:
+        def table(name):
+            member = next((x for x in z.namelist() if x.split('/')[-1] == name), None)
+            if member is None:
+                return []
+            with z.open(member) as f:
+                return list(csv.DictReader(io.TextIOWrapper(f, encoding='utf-8-sig')))
+        return {k: table(k + '.txt') for k in ('stops', 'routes', 'trips', 'stop_times', 'calendar', 'calendar_dates')}
+
+
+def gtfs_sec(s):
+    h, m, sec = map(int, s.strip().split(':'))
+    return h * 3600 + m * 60 + sec
+
+
+def day_type_of(ymd):
+    import datetime
+    d = datetime.date(int(ymd[:4]), int(ymd[4:6]), int(ymd[6:]))
+    return 'holiday' if d.weekday() >= 5 or ymd in HOLIDAYS else 'weekday'
+
+
+def service_days(g):
+    """service_id → その便が走るダイヤの種類 ('weekday' / 'holiday')"""
+    days = {}
+    for c in g['calendar']:
+        ds = set()
+        if any(c.get(d) == '1' for d in ('monday', 'tuesday', 'wednesday', 'thursday', 'friday')):
+            ds.add('weekday')
+        if any(c.get(d) == '1' for d in ('saturday', 'sunday')):
+            ds.add('holiday')
+        days[c['service_id']] = ds
+    # calendar.txt に無い service_id は、calendar_dates.txt の運行日から判定する
+    for c in g['calendar_dates']:
+        if c.get('exception_type') == '1' and c['service_id'] not in {x['service_id'] for x in g['calendar']}:
+            days.setdefault(c['service_id'], set()).add(day_type_of(c['date']))
+    return {k: sorted(v) for k, v in days.items()}
+
+
+def gtfs_services(zpath, line_ids, prefix, group, spec, colors, alias=None, route_name=None):
+    """GTFS の便を、停車駅の並びが同じものごとに 1 つの系統にまとめる。経路は line_ids の路線の線路を使う。
+    alias: GTFS の停留場名 → 路線データの駅名 (略称などの読み替え)"""
+    g = read_gtfs(zpath)
+    alias = {norm(k): norm(v) for k, v in (alias or {}).items()}
+    stop_name = {s['stop_id']: alias.get(norm(s['stop_name']), norm(s['stop_name'])) for s in g['stops']}
+    route_of = {r['route_id']: r for r in g['routes']}
+    days = service_days(g)
+    times = {}
+    for r in g['stop_times']:
+        times.setdefault(r['trip_id'], []).append(r)
+    patterns = {}
+    for t in g['trips']:
+        st = sorted(times.get(t['trip_id'], []), key=lambda r: int(r['stop_sequence']))
+        if len(st) < 2:
+            continue
+        names = tuple(stop_name[r['stop_id']] for r in st)
+        patterns.setdefault((t['route_id'], names), []).append((t, st))
+    out, unmatched = [], []
+    for k, ((route_id, names), trips) in enumerate(sorted(patterns.items(), key=lambda x: (x[0][0], x[0][1]))):
+        found = None
+        for lid in line_ids:
+            lst = [norm(n) for n, _ in stations_of(lid)]
+            if all(n in lst for n in names):
+                idx = [lst.index(n) for n in names]
+                if idx == sorted(idx) or idx == sorted(idx, reverse=True):
+                    found = (lid, idx)
+                    break
+        if found is None:
+            unmatched.append((names, len(trips)))
+            continue
+        lid, idx = found
+        st_names = [stations_of(lid)[i][0] for i in idx]
+        path = seg(lid, st_names[0], st_names[-1])
+        rows = rows_of(path, set(st_names))
+        trip_rows = []
+        for t, st in trips:
+            dep0 = gtfs_sec(st[0]['departure_time'] or st[0]['arrival_time'])
+            tt = [[gtfs_sec(r['arrival_time'] or r['departure_time']) - dep0, gtfs_sec(r['departure_time'] or r['arrival_time']) - dep0] for r in st]
+            trip_rows.append({'dep': dep0, 't': tt, 'days': days.get(t['service_id'], ['weekday', 'holiday'])})
+        trip_rows.sort(key=lambda x: x['dep'])
+        route = route_of.get(route_id, {})
+        rname = route.get('route_short_name') or route.get('route_long_name') or ''
+        if route_name:
+            rname = route_name(rname)
+        color = colors(rname, route)
+        out.append({**spec, 'id': f'{prefix}{k}', 'name': f'{rname} {st_names[0]}〜{st_names[-1]}'.strip(), 'group': group,
+                    'line': lid, 'color': color, 'loop': False, 'both': False, 'offset': 0, 'path': rows, 'trips': trip_rows})
+    for names, n in unmatched:
+        print(f'  {prefix}: 路線の駅と合わない便 {n} 本を除外: {" → ".join(names)}')
+    return out
+
+
+def hakodate_color(rname, route):
+    if route.get('route_color'):
+        return '#' + route['route_color'].lstrip('#')
+    return '#E57373' if '2' in rname else '#4FC3F7'  # route_color が無いとき
+
+
+hakodate_zip = os.path.join(CACHE, 'hakodate_tram_gtfs.zip')
+try:
+    if not os.path.exists(hakodate_zip):
+        print('download', HAKODATE_GTFS_URL)
+        urllib.request.urlretrieve(HAKODATE_GTFS_URL, hakodate_zip)
+    # GTFS の系統名は ② ⑤、停留場名は「アリーナ前」(正式には 函館アリーナ前)
+    hakodate = gtfs_services(hakodate_zip, ['hakodate_tram2', 'hakodate_tram5'], 'hakodate_gtfs', 'tram', TRAM, hakodate_color,
+                             alias={'アリーナ前': '函館アリーナ前'},
+                             route_name=lambda r: f'{unicodedata.normalize("NFKC", r)}系統' if r in '①②③④⑤' else r)
+except OSError as e:
+    print('  函館市電の時刻表データを取得できないため、推計ダイヤにする:', e)
+    hakodate = []
+if hakodate:
+    services.extend(hakodate)
+    CREDITS.append('函館市企業局 函館市電 GTFS')
+else:
+    service('hakodate2', '2系統 湯の川〜谷地頭', 'tram', 'hakodate_tram2', '#E57373', [('hakodate_tram2', '湯の川', '谷地頭')],
+            TRAM, bands=[['06:30', '22:30', 16]])
+    service('hakodate5', '5系統 湯の川〜函館どつく前', 'tram', 'hakodate_tram5', '#4FC3F7', [('hakodate_tram5', '湯の川', '函館どつく前')],
+            TRAM, bands=[['06:30', '22:30', 12]], offset=6)
 
 # JR北海道 普通・快速 (運転間隔はすべて推計)
 LOCALS = [
@@ -952,7 +1075,7 @@ network = {
     'services': services,
     'airports': airports,
     'calendar': {'holidays': holidays},
-    'credits': [],
+    'credits': CREDITS,
     'trackSource': '国土数値情報（鉄道データ）',
 }
 
