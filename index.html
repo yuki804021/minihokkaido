@@ -3,8 +3,8 @@
 <head>
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
-  <title>Mini Shikoku 3D — 松山の電車を3Dで</title>
-  <meta name="description" content="松山を中心に、四国の鉄道の列車の動きを3D地図上で可視化するデモ">
+  <title>Mini Hokkaido 3D — 札幌・北海道の鉄道を3Dで</title>
+  <meta name="description" content="札幌を中心に、北海道の鉄道の列車の動きを3D地図上で可視化するデモ">
   <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/maplibre-gl@4.7.1/dist/maplibre-gl.css">
   <link rel="stylesheet" href="css/style.css">
 </head>
@@ -14,8 +14,8 @@
   <aside id="panel">
     <header class="panel-head">
       <div>
-        <h1>Mini Shikoku 3D</h1>
-        <p class="sub">松山・四国の鉄道をリアルタイム3Dで</p>
+        <h1>Mini Hokkaido 3D</h1>
+        <p class="sub">札幌・北海道の鉄道をリアルタイム3Dで</p>
       </div>
       <button id="panel-toggle" class="icon" aria-label="パネルを開閉">☰</button>
     </header>
@@ -39,22 +39,24 @@
 
       <section>
         <h2>駅をさがす</h2>
-        <input id="search" type="search" list="station-list" placeholder="駅名を入力（例: 道後温泉）" autocomplete="off">
+        <input id="search" type="search" list="station-list" placeholder="駅名を入力（例: 大通）" autocomplete="off">
         <datalist id="station-list"></datalist>
       </section>
 
       <section>
         <h2>エリア</h2>
         <div class="row wrap">
-          <button data-view="matsuyama">松山 中心部</button>
-          <button data-view="dogo">道後温泉</button>
-          <button data-view="matsuyama_wide">松山 郊外</button>
-          <button data-view="takamatsu">高松</button>
-          <button data-view="tokushima">徳島</button>
-          <button data-view="kochi">高知</button>
-          <button data-view="seto_ohashi">瀬戸大橋</button>
-          <button data-view="shikoku">四国全体</button>
-          <button data-view="setouchi">瀬戸内の航路</button>
+          <button data-view="sapporo">札幌 中心部</button>
+          <button data-view="susukino">すすきの</button>
+          <button data-view="sapporo_wide">札幌 近郊</button>
+          <button data-view="new_chitose">新千歳空港</button>
+          <button data-view="otaru">小樽</button>
+          <button data-view="asahikawa">旭川</button>
+          <button data-view="hakodate">函館</button>
+          <button data-view="kushiro">釧路</button>
+          <button data-view="seikan">津軽海峡</button>
+          <button data-view="wakkanai">稚内・利尻・礼文</button>
+          <button data-view="hokkaido">北海道全体</button>
         </div>
       </section>
 
@@ -114,7 +116,7 @@
   </div>
 
   <div id="cinema-bar">
-    <span id="cinema-title">Mini Shikoku 3D <span id="cinema-clock"></span></span>
+    <span id="cinema-title">Mini Hokkaido 3D <span id="cinema-clock"></span></span>
     <button id="cinema-exit">撮影モードを終了（Esc）</button>
   </div>
 
@@ -150,14 +152,16 @@
   <div id="airport" class="card" hidden>
     <div class="info-head">
       <div>
-        <div class="card-kicker">空港の利用状況（2025年）</div>
+        <div id="airport-kicker" class="card-kicker">空港</div>
         <div id="airport-name"></div>
       </div>
       <button id="airport-close" class="icon" aria-label="閉じる">×</button>
     </div>
+    <div id="airport-meta" class="stat-sub"></div>
+    <p id="airport-routes" class="stat-sub"></p>
+    <div id="airport-stats" hidden>
     <div class="stat-big"><span id="airport-total"></span><small>乗降客数</small></div>
     <div id="airport-split" class="stat-sub"></div>
-    <div id="airport-meta" class="stat-sub"></div>
     <h3>月別の乗降客数（2025年）</h3>
     <div class="mini-chart">
       <svg id="airport-monthly" role="img"></svg>
@@ -172,11 +176,12 @@
       <summary>表で見る</summary>
       <table id="airport-table"><thead><tr><th>年</th><th>乗降客数</th><th>着陸回数</th></tr></thead><tbody></tbody></table>
     </details>
+    </div>
     <div class="flight-lists">
       <div><h3>まもなく出発</h3><ol id="airport-deps" class="flight-list"></ol></div>
       <div><h3>まもなく到着</h3><ol id="airport-arrs" class="flight-list"></ol></div>
     </div>
-    <p class="note">乗降客数・着陸回数: 国土交通省「空港管理状況調書」。空港の位置・運用時間: 国土数値情報（空港データ）。発着便は就航路線と便数からの推計です。</p>
+    <p class="note">空港の位置・滑走路・運用時間は概略、就航先・便数・発着時刻は推計です（実際の時刻表ではありません）。利用統計は未収録です。</p>
   </div>
 
   <script src="https://cdn.jsdelivr.net/npm/maplibre-gl@4.7.1/dist/maplibre-gl.js"></script>

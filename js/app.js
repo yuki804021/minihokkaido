@@ -1,4 +1,4 @@
-// Mini Shikoku 3D — 松山を中心とした四国の鉄道 3D 可視化
+// Mini Hokkaido 3D — 札幌を中心とした北海道の鉄道 3D 可視化
 (function () {
   'use strict';
 
@@ -35,15 +35,17 @@
   };
 
   const VIEWS = {
-    matsuyama: { center: [132.7655, 33.8425], zoom: 14.6, pitch: 60, bearing: -25 },
-    dogo: { center: [132.7835, 33.8490], zoom: 16.3, pitch: 65, bearing: 30 },
-    matsuyama_wide: { center: [132.785, 33.828], zoom: 11.8, pitch: 50, bearing: -10 },
-    takamatsu: { center: [134.046, 34.338], zoom: 13.2, pitch: 55, bearing: 0 },
-    kochi: { center: [133.535, 33.562], zoom: 13.4, pitch: 55, bearing: 0 },
-    tokushima: { center: [134.551, 34.074], zoom: 13.2, pitch: 55, bearing: 0 },
-    shikoku: { center: [133.45, 33.72], zoom: 7.7, pitch: 35, bearing: 0 },
-    setouchi: { center: [132.95, 33.95], zoom: 8.6, pitch: 45, bearing: 0 },
-    seto_ohashi: { center: [133.818, 34.385], zoom: 11.6, pitch: 60, bearing: -20 },
+    sapporo: { center: [141.3525, 43.0640], zoom: 14.4, pitch: 60, bearing: -20 },
+    susukino: { center: [141.3540, 43.0560], zoom: 16.0, pitch: 65, bearing: 20 },
+    sapporo_wide: { center: [141.40, 43.06], zoom: 11.2, pitch: 50, bearing: -10 },
+    new_chitose: { center: [141.675, 42.790], zoom: 12.6, pitch: 55, bearing: 0 },
+    otaru: { center: [141.000, 43.195], zoom: 13.2, pitch: 55, bearing: 0 },
+    asahikawa: { center: [142.355, 43.765], zoom: 13.0, pitch: 55, bearing: 0 },
+    hakodate: { center: [140.740, 41.775], zoom: 13.2, pitch: 55, bearing: -10 },
+    kushiro: { center: [144.382, 42.990], zoom: 13.0, pitch: 55, bearing: 0 },
+    seikan: { center: [140.60, 41.45], zoom: 8.6, pitch: 45, bearing: 0 },
+    wakkanai: { center: [141.45, 45.32], zoom: 9.2, pitch: 45, bearing: 0 },
+    hokkaido: { center: [142.9, 43.45], zoom: 6.4, pitch: 30, bearing: 0 },
   };
 
   // ---------------------------------------------------------------- 状態
@@ -87,7 +89,7 @@
   }
 
   // ---------------------------------------------------------------- 地図
-  const initView = VIEWS[params.get('view')] || VIEWS.matsuyama;
+  const initView = VIEWS[params.get('view')] || VIEWS.sapporo;
   const map = new maplibregl.Map({
     container: 'map',
     style: { version: 8, glyphs: GLYPHS, sources: {}, layers: [{ id: 'bg', type: 'background', paint: { 'background-color': '#dfe3e6' } }] },
@@ -107,8 +109,7 @@
       '駅の並び: <a href="https://ekidata.jp/" target="_blank">駅データ.jp</a>',
       ...(NET.credits && NET.credits.length
         ? [`時刻表（GTFS）: ${NET.credits.map(c => c.replace(/（.*?）/, '').replace(/\s*GTFS$/, '')).join('・')}（<a href="https://creativecommons.org/licenses/by/4.0/deed.ja" target="_blank">CC BY 4.0</a>）`] : []),
-      '航路: © <a href="https://www.openstreetmap.org/copyright" target="_blank">OpenStreetMap</a> contributors',
-      '空港統計: 国土交通省',
+      '航路・空港: 概略',
       'その他の時刻は推計',
       '<a href="DATA_SOURCES.md" target="_blank">データ出典</a>',
     ].join(' | '),
@@ -256,8 +257,8 @@
       paint: {
         // 面積が乗降客数に比例するよう、半径は平方根に比例させる
         'circle-radius': ['interpolate', ['linear'], ['zoom'],
-          7, ['*', 9, ['sqrt', ['/', ['get', 'passengers'], 3300000]]],
-          12, ['*', 22, ['sqrt', ['/', ['get', 'passengers'], 3300000]]]],
+          7, ['case', ['has', 'passengers'], ['*', 9, ['sqrt', ['/', ['get', 'passengers'], 3300000]]], 6],
+          12, ['case', ['has', 'passengers'], ['*', 22, ['sqrt', ['/', ['get', 'passengers'], 3300000]]], 14]],
         'circle-color': 'rgba(0,0,0,0)',
         'circle-stroke-color': dark ? '#8fb6e8' : '#2a5a96',
         'circle-stroke-width': 2,
@@ -365,10 +366,10 @@
   function airportsGeoJSON() {
     const features = [];
     for (const a of NET.airports || []) {
-      const props = {
-        id: a.id, name: a.name, passengers: a.stats.passengers,
-        label: `${a.stats.year}年 ${Math.round(a.stats.passengers / 10000)}万人`,
-      };
+      // 利用統計の無い空港は、印を一定の大きさで描き、ラベルは名前だけにする
+      const props = a.stats
+        ? { id: a.id, name: a.name, passengers: a.stats.passengers, label: `${a.stats.year}年 ${Math.round(a.stats.passengers / 10000)}万人` }
+        : { id: a.id, name: a.name, label: '' };
       features.push({ type: 'Feature', properties: { ...props, shape: 'area' }, geometry: { type: 'Polygon', coordinates: [a.polygon] } });
       features.push({ type: 'Feature', properties: { ...props, shape: 'point' }, geometry: { type: 'Point', coordinates: a.coord } });
     }
@@ -428,9 +429,9 @@
   }
 
   // ---------------------------------------------------------------- 太陽と空
-  // シミュレーション時刻の太陽の位置 (松山付近) から光の向き・色・空の色を決める
+  // シミュレーション時刻の太陽の位置 (札幌付近) から光の向き・色・空の色を決める
   function sunPosition(sec) {
-    const SUN_LAT = 33.84, SUN_LON = 132.77;
+    const SUN_LAT = 43.06, SUN_LON = 141.35;
     const now = new Date(Date.now() + 9 * 3600 * 1000);
     const start = Date.UTC(now.getUTCFullYear(), 0, 0);
     const day = Math.floor((now.getTime() - start) / 86400000);
@@ -774,9 +775,14 @@
       const sv = tr.service;
       const alt = Math.round(altitudeAt(sv, tr.dist) / 10) * 10;
       const left = Math.max(0, Math.round((tr.segs[tr.segs.length - 1].t1 - tr.elapsed) / 60));
-      status = sv.flight === 'dep'
-        ? (alt > 0 ? `${sv.toName} へ向けて上昇中（高度 約${alt.toLocaleString()} m）` : '離陸滑走中')
-        : (alt > 0 ? `着陸まで あと約${left}分（高度 約${alt.toLocaleString()} m）` : '着陸しました');
+      // 道内便 (domestic) は 1 本の経路で離陸から着陸まで飛ぶので、高度が上がっている間は上昇中とする
+      const climbing = sv.flight === 'dep' || (sv.flight === 'domestic' && altitudeAt(sv, tr.dist + 1000) > altitudeAt(sv, tr.dist));
+      const onGround = alt <= 0;
+      status = climbing
+        ? (onGround ? '離陸滑走中' : `${sv.toName} へ向けて上昇中（高度 約${alt.toLocaleString()} m）`)
+        : (onGround
+          ? (tr.dist > 0 ? '着陸しました' : '離陸滑走中')
+          : `着陸まで あと約${left}分（高度 約${alt.toLocaleString()} m）`);
       document.getElementById('info-status').textContent = status;
       document.getElementById('info-stops').replaceChildren();
       return;
@@ -785,7 +791,7 @@
     if (cp && cp.role === 'split' && tr.waiting) {
       status = `${cp.station}で ${cp.partnerName} から切り離し（${formatTime(tr.dep).slice(0, 5)} 発）`;
     } else if (cp && cp.role === 'join' && tr.stopped && tr.at === path.length - 1) {
-      status = `${cp.station}で ${cp.partnerName} の後ろに連結（併結して松山へ）`;
+      status = `${cp.station}で ${cp.partnerName} の後ろに連結（併結して${cp.partner.destination}へ）`;
     } else if (cp && cp.role === 'lead-join' && tr.stopped && tr.at === cp.index) {
       status = `${cp.station}で ${cp.name.replace('特急 ', '')} と連結中（${formatTime(tr.dep + cp.at).slice(0, 5)} 発）`;
     } else if (cp && cp.role === 'lead-split' && tr.stopped && tr.at === cp.index) {
@@ -842,7 +848,7 @@
     const sv = tr.service;
     const p = tr.pattern;
     const dest = sv.kind === 'plane'
-      ? (sv.flight === 'dep' ? `${sv.toName} 行き（出発便）` : `${sv.fromName} 発（到着便）`)
+      ? ({ dep: `${sv.toName} 行き（出発便）`, arr: `${sv.fromName} 発（到着便）` }[sv.flight] || `${sv.toName} 行き（道内便）`)
       : sv.loop ? '' : `${p.destination} 行`;
     const origin = p.path[0][0];
     document.getElementById('info-swatch').style.background = sv.color;
@@ -853,9 +859,10 @@
     document.getElementById('info-dest').textContent = dest;
     document.getElementById('info-detail').textContent =
       (sv.kind === 'plane'
-        ? (sv.flight === 'dep'
-          ? `${sv.fromName} ${formatTime(tr.dep).slice(0, 5)} 離陸`
-          : `${sv.toName} ${formatTime(tr.dep + tr.segs[tr.segs.length - 1].t1).slice(0, 5)} 着陸予定`)
+        ? ({
+          dep: `${sv.fromName} ${formatTime(tr.dep).slice(0, 5)} 離陸`,
+          arr: `${sv.toName} ${formatTime(tr.dep + tr.segs[tr.segs.length - 1].t1).slice(0, 5)} 着陸予定`,
+        }[sv.flight] || `${sv.fromName} ${formatTime(tr.dep).slice(0, 5)} 離陸 → ${sv.toName} ${formatTime(tr.dep + tr.segs[tr.segs.length - 1].t1).slice(0, 5)} 着陸予定`)
         : `${origin} ${formatTime(tr.dep).slice(0, 5)} 発 · ${p.tripSegs ? '時刻表データ' : '推計ダイヤ'}`)
       + (sv.note ? ` · ${sv.note}` : '');
     const followBtn = document.getElementById('info-follow');
@@ -1085,11 +1092,19 @@
     box.hidden = false;
     const st = a.stats;
     document.getElementById('airport-name').textContent = a.name;
+    document.getElementById('airport-kicker').textContent = st ? `空港の利用状況（${st.year}年）` : '空港';
+    document.getElementById('airport-meta').textContent =
+      `滑走路 ${fmtInt(a.runway)} m ・ 運用 ${a.hours[0].slice(0, 2)}:${a.hours[0].slice(2)}〜${a.hours[1].slice(0, 2)}:${a.hours[1].slice(2)}`;
+    document.getElementById('airport-stats').hidden = !st;
+    document.getElementById('airport-routes').textContent = st ? '' :
+      `就航先（推計）: ${a.routes.map(r => `${r.dest} ${r.perDay}便`).join('・')}`;
+    if (!st) {
+      renderAirportFlights();
+      return;
+    }
     document.getElementById('airport-total').textContent = `${fmtInt(st.passengers)} 人`;
     document.getElementById('airport-split').textContent =
       `国内線 ${man(st.domestic)}人 ・ 国際線 ${man(st.international)}人 ・ 着陸 ${fmtInt(st.landings)} 回`;
-    document.getElementById('airport-meta').textContent =
-      `滑走路 ${fmtInt(a.runway)} m ・ 運用 ${a.hours[0].slice(0, 2)}:${a.hours[0].slice(2)}〜${a.hours[1].slice(0, 2)}:${a.hours[1].slice(2)}`;
     const monthly = st.monthly.map(m => ({ v: m.passengers, label: `${st.year}年${m.month}月`, short: `${m.month}月` }));
     barChart(document.getElementById('airport-monthly'), document.getElementById('airport-monthly-tip'), monthly,
       `${a.name} ${st.year}年の月別乗降客数。最多は${monthly.reduce((b, r) => (r.v > b.v ? r : b)).label}`);

@@ -264,7 +264,7 @@
         }
         return st.id;
       };
-      // 航空便は四国の外と行き来するだけなので、乗り換えの計算には入れない
+      // 航空便は乗り換えの計算には入れない (空港どうしの移動は到達圏の対象外)
       for (const p of this.patterns) {
         p.stopIds = p.service.kind === 'plane' ? p.path.map(() => -1) : p.path.map(q => (q[2] ? idOf(q[0], q[1]) : -1));
       }
