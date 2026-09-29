@@ -1223,6 +1223,14 @@ for i, (a, b, n) in enumerate(INTERNAL):
 services.extend(plane_services)
 
 
+# 滑走路の番号 (両端) と、平行滑走路 (L / R) があるか。実際の飛行機 (ADS-B) の使用滑走路の推定に使う
+RUNWAY_NAMES = {
+    'CTS': ('01', '19', True), 'OKD': ('14', '32', False), 'HKD': ('12', '30', False), 'AKJ': ('16', '34', False),
+    'KUH': ('17', '35', False), 'OBO': ('17', '35', False), 'MMB': ('18', '36', False), 'SHB': ('08', '26', False),
+    'MBE': ('14', '32', False), 'WKJ': ('08', '26', False), 'RIS': ('07', '25', False), 'OIR': ('13', '31', False),
+}
+
+
 def runway_polygon(ap):
     _, _, c, hdg, runway, _ = ap
     half_l, half_w = runway / 2 + 200, 150
@@ -1240,8 +1248,14 @@ for ap in AIRPORTS:
     for a, b, n in INTERNAL:
         if code in (a, b):
             routes.append({'dest': AP[b if code == a else a][1].replace('空港', ''), 'perDay': n, 'intl': False})
+    # 滑走路の両端の名前 (磁方位の 10 分の 1) と真方位。北海道の磁気偏角は西へ約 9 度
+    n1, n2, parallel = RUNWAY_NAMES[code]
+    diff = lambda a, b: abs((a - b + 180) % 360 - 180)
+    h1 = hdg if diff(hdg, int(n1) * 10 - 9) <= diff(hdg + 180, int(n1) * 10 - 9) else (hdg + 180) % 360
+    ends = [{'name': n1, 'heading': round(h1, 1)}, {'name': n2, 'heading': round((h1 + 180) % 360, 1)}]
     airports.append({'id': code, 'name': name, 'coord': c, 'heading': hdg, 'runway': runway, 'hours': hours,
                      'polygon': AIRPORT_INFO.get(code, {}).get('polygon') or runway_polygon(ap),
+                     'runwayEnds': ends, 'parallel': parallel,
                      'stats': AIRPORT_STATS.get(code), 'routes': routes})
 
 # ------------------------------------------------------------------ 出力

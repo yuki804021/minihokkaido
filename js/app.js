@@ -65,6 +65,8 @@
     follow: false,
     clock: { base: jstNow(), realBase: performance.now(), speed: 1, paused: false },
   };
+  // 実際の飛行機 (ADS-B) の状態。処理は「実際の飛行機 (ADS-B)」の節
+  const live = { on: false, available: null, list: [], source: '', fetchedAt: 0, error: '', selected: null, seen: {}, timer: null, busy: false };
   if (params.get('t')) state.clock.base = parseTime(params.get('t'));
   if (params.get('speed')) state.clock.speed = Number(params.get('speed')) || 1;
 
@@ -519,15 +521,17 @@
   }
 
   function planeFeatures(tr, scale, features, lights) {
-    const sv = tr.service;
-    const s = Math.max(1, scale / 2);
-    const L = sv.carLength * s, span = sv.width * s, h = sv.height * s;
     const p = tr.pattern.pointAt(tr.dist);
-    const brg = p.brg;
+    drawPlane(tr.id, p.c, p.brg, altitudeAt(tr.service, tr.dist), tr.service, tr.service.color, scale, features, lights);
+  }
+
+  // 飛行機の形 (推計の航空便と、実際の飛行機 (ADS-B) で共通)。c は機首の位置、brg は進行方位 [rad]、alt は高度 [m]
+  function drawPlane(id, c, brg, alt, dims, color, scale, features, lights) {
+    const s = Math.max(1, scale / 2);
+    const L = dims.carLength * s, span = dims.width * s, h = dims.height * s;
     const left = brg - Math.PI / 2;
     // 機首を現在地に置き、胴体・翼をその後ろに描く
-    const at = (back, side) => offset(offset(p.c, brg + Math.PI, back), left, side);
-    const alt = altitudeAt(sv, tr.dist);
+    const at = (back, side) => offset(offset(c, brg + Math.PI, back), left, side);
     const base = alt + 0.5 * s;
     const poly = ring => { ring.push(ring[0]); return { type: 'Polygon', coordinates: [ring] }; };
     const body = poly([at(0, 0), at(L * 0.08, L * 0.06), at(L, L * 0.05), at(L, -L * 0.05), at(L * 0.08, -L * 0.06)]);
@@ -535,8 +539,8 @@
       at(L * 0.62, -span / 2), at(L * 0.55, -span / 2)]);
     const tail = poly([at(L * 0.85, 0), at(L * 0.95, span * 0.18), at(L, span * 0.18), at(L, -span * 0.18),
       at(L * 0.95, -span * 0.18)]);
-    for (const [geometry, color, hh] of [[body, sv.color, h], [wing, '#c9d2dc', h * 0.35], [tail, '#c9d2dc', h * 0.35]]) {
-      features.push({ type: 'Feature', properties: { id: tr.id, color, b: base, h: base + hh }, geometry });
+    for (const [geometry, col, hh] of [[body, color, h], [wing, '#c9d2dc', h * 0.35], [tail, '#c9d2dc', h * 0.35]]) {
+      features.push({ type: 'Feature', properties: { id, color: col, b: base, h: base + hh }, geometry });
     }
     lights.push(light(at(L * 0.6, span / 2), '#ff3b30'));
     lights.push(light(at(L * 0.6, -span / 2), '#34c759'));
@@ -694,18 +698,23 @@
     document.getElementById('cinema-clock').textContent = formatTime(t).slice(0, 5);
     if (!map.getSource('trains')) return;
     updateSun(((t % 86400) + 86400) % 86400);
-    const trains = sim.trainsAt(((t % 86400) + 86400) % 86400, sv => state.groups[sv.group]);
+    // 実際の飛行機 (ADS-B) を表示している間は、推計の航空便を隠す
+    const showLive = liveActive();
+    const trains = sim.trainsAt(((t % 86400) + 86400) % 86400, sv => state.groups[sv.group] && !(showLive && sv.kind === 'plane'));
     lastTrains = trains;
     const drawn = trainFeatures(visibleTrains(trains), sizeScale());
+    if (showLive) liveFeatures(sizeScale(), drawn.trains.features, drawn.lights.features);
     map.getSource('trains').setData(drawn.trains);
     map.getSource('train-lights').setData(state.night > 0.05 ? drawn.lights : empty());
     document.getElementById('train-count').textContent = String(trains.length);
     updateSelection(trains, t);
+    if (live.selected) updateLiveSelection();
     if (now - lastBoard > 1000) {
       lastBoard = now;
       if (state.station) renderStation();
       if (state.airport) renderAirportFlights();
-      if (state.selected) renderInfo(); // 併結・切り離しで列車名や両数が変わる
+      if (state.selected || live.selected) renderInfo(); // 併結・切り離しで列車名や両数が変わる
+      renderLiveNote();
       renderChartNow();
     }
   }
@@ -715,7 +724,9 @@
   // ---------------------------------------------------------------- 列車の選択
   map.on('click', 'trains', e => {
     const id = e.features[0].properties.id;
-    state.selected = id;
+    // 実際の飛行機は id が live:<機体の ICAO アドレス>
+    live.selected = id.startsWith('live:') ? id.slice(5) : null;
+    state.selected = live.selected ? null : id;
     state.follow = false;
     state.station = null;
     e.preventDefault();
@@ -744,6 +755,7 @@
   map.on('click', e => {
     if (e.defaultPrevented) return;
     state.selected = null;
+    live.selected = null;
     state.follow = false;
     state.station = null;
     state.airport = null;
@@ -841,6 +853,10 @@
   }
 
   function renderInfo() {
+    if (live.selected) {
+      renderLiveInfo();
+      return;
+    }
     const box = document.getElementById('info');
     const tr = state.selected && lastTrains.find(x => x.id === state.selected);
     if (!state.selected || !tr) {
@@ -1128,6 +1144,7 @@
   function renderAirportFlights() {
     const a = state.airport && (NET.airports || []).find(x => x.id === state.airport);
     if (!a) return;
+    renderAirportLive(a);
     const t = ((simTime() % 86400) + 86400) % 86400;
     const visible = sv => state.groups[sv.group];
     const deps = sim.departuresAt(a.name, a.coord, t, { limit: 4, radius: 4000, isVisible: visible });
@@ -1209,7 +1226,9 @@
 
   document.getElementById('info-follow').addEventListener('click', () => {
     state.follow = !state.follow;
-    if (state.follow) {
+    const la = live.selected && live.list.find(x => x.hex === live.selected);
+    if (state.follow && la) map.easeTo({ center: livePosition(la).c, zoom: Math.max(map.getZoom(), 12), pitch: 60, duration: 800 });
+    if (state.follow && !la) {
       const tr = lastTrains.find(x => x.id === state.selected);
       if (tr) {
         map.easeTo({ center: tr.pattern.pointAt(tr.dist).c, zoom: Math.max(map.getZoom(), 15.5), pitch: 60, duration: 800 });
@@ -1219,6 +1238,7 @@
   });
   document.getElementById('info-close').addEventListener('click', () => {
     state.selected = null;
+    live.selected = null;
     state.follow = false;
     renderInfo();
   });
@@ -1443,6 +1463,196 @@
     svg.addEventListener('click', e => setClock(toTime(e), state.clock.speed));
   })();
   renderDayChart();
+
+  // ---------------------------------------------------------------- 実際の飛行機 (ADS-B)
+  // tools/serve.py で起動したときだけ使える。/api/live が ADS-B のオープンデータ (adsb.lol など) を中継する。
+  // 実際の今の位置なので、時計が「実時間・現在時刻」のときだけ表示し、その間は推計の航空便を隠す
+  const LIVE_INTERVAL = 10000; // 問い合わせの間隔 [ms]
+  const FT = 0.3048, KT = 0.514444;
+  const LIVE_DIMS = { carLength: 40, width: 36, height: 6 };
+  const LIVE_COLOR = '#ffb300';
+  const liveBtn = document.getElementById('live');
+  const angDiff = (a, b) => Math.abs((((a - b) % 360) + 540) % 360 - 180);
+
+  function liveRealtime() {
+    const c = state.clock;
+    const diff = Math.abs((((simTime() - jstNow()) % 86400) + 86400 + 43200) % 86400 - 43200);
+    return !c.paused && c.speed === 1 && diff < 120;
+  }
+
+  function liveActive() {
+    return live.on && live.available === true && liveRealtime();
+  }
+
+  async function pollLive() {
+    if (!live.on || live.busy || !liveRealtime()) return;
+    live.busy = true;
+    // 画面の中心から、画面の角までの距離 (海里) の範囲。提供元の上限は 250 海里
+    const c = map.getCenter();
+    const b = map.getBounds();
+    const nm = Math.min(250, Math.max(20, Sim.haversine([c.lng, c.lat], [b.getEast(), b.getNorth()]) / 1852));
+    try {
+      const res = await fetch(`api/live?lat=${c.lat.toFixed(3)}&lon=${c.lng.toFixed(3)}&dist=${Math.ceil(nm)}`, { cache: 'no-store' });
+      if (res.status === 404) {
+        live.available = false; // python -m http.server で開いている
+      } else {
+        const d = await res.json();
+        if (!res.ok) throw new Error(d.error || `HTTP ${res.status}`);
+        live.available = true;
+        live.error = '';
+        live.source = d.source;
+        live.fetchedAt = performance.now();
+        // 地上の車両など (カテゴリ C) は除く
+        live.list = (d.aircraft || []).filter(a => typeof a.lat === 'number' && typeof a.lon === 'number' && !String(a.category || '').startsWith('C'));
+        for (const a of live.list) {
+          const r = liveRunwayOf(a);
+          if (r) live.seen[r.airport.id] = [...(live.seen[r.airport.id] || []).filter(x => x.hex !== a.hex), { ...r, hex: a.hex, flight: callsign(a), at: Date.now() }];
+        }
+      }
+    } catch (e) {
+      live.error = String(e.message || e);
+    }
+    live.busy = false;
+    renderLiveNote();
+  }
+
+  function callsign(a) {
+    return (a.flight || '').trim() || (a.r ? a.r : `機体 ${a.hex}`);
+  }
+
+  // 受信した位置から、速度と進行方向で今の位置を推定する (最大 60 秒先まで)
+  function livePosition(a) {
+    const age = Math.min(60, (performance.now() - live.fetchedAt) / 1000 + (a.seen_pos || 0));
+    const ground = a.alt_baro === 'ground';
+    const trk = a.track ?? a.true_heading ?? a.mag_heading ?? 0;
+    const brg = trk * Math.PI / 180;
+    const c = a.gs && age > 0 ? offset([a.lon, a.lat], brg, a.gs * KT * age) : [a.lon, a.lat];
+    const altFt = ground ? 0 : (typeof a.alt_baro === 'number' ? a.alt_baro : (a.alt_geom || 0));
+    return { c, brg, alt: Math.max(0, altFt * FT), ground, age };
+  }
+
+  function liveFeatures(scale, features, lights) {
+    for (const a of live.list) {
+      const p = livePosition(a);
+      drawPlane(`live:${a.hex}`, p.c, p.brg, p.alt, LIVE_DIMS, a.hex === live.selected ? '#ff6d00' : LIVE_COLOR, scale, features, lights);
+    }
+  }
+
+  // 使用滑走路の推定: 空港から 8km 以内で、高度 2000ft 未満 (または地上を 30kt 以上で走行中)、
+  // 進行方向が滑走路の向きと 20 度以内。平行滑走路の L / R は、空港標点から見て左右どちらにいるかで決める
+  function liveRunwayOf(a) {
+    const ground = a.alt_baro === 'ground';
+    if (!ground && !(typeof a.alt_baro === 'number' && a.alt_baro < 2000)) return null;
+    if ((a.gs || 0) < 30) return null;
+    const trk = a.track ?? a.true_heading;
+    if (trk == null) return null;
+    const pos = [a.lon, a.lat];
+    for (const ap of NET.airports || []) {
+      if (!ap.runwayEnds || Sim.haversine(pos, ap.coord) > 8000) continue;
+      const end = ap.runwayEnds.find(e => angDiff(e.heading, trk) < 20);
+      if (!end) continue;
+      let name = end.name;
+      if (ap.parallel) {
+        const rel = (Sim.bearing(ap.coord, pos) * 180 / Math.PI) - end.heading;
+        name += Math.sin(rel * Math.PI / 180) > 0 ? 'R' : 'L';
+      }
+      const rate = a.baro_rate ?? a.geom_rate;
+      const toward = angDiff(Sim.bearing(pos, ap.coord) * 180 / Math.PI, trk) < 90;
+      const phase = ground ? '滑走中' : rate != null && Math.abs(rate) > 200 ? (rate < 0 ? '着陸' : '離陸') : (toward ? '着陸' : '離陸');
+      return { airport: ap, name, phase };
+    }
+    return null;
+  }
+
+  function renderLiveInfo() {
+    const box = document.getElementById('info');
+    const a = live.list.find(x => x.hex === live.selected);
+    if (!a || !liveActive()) {
+      box.hidden = true;
+      return;
+    }
+    const p = livePosition(a);
+    document.getElementById('info-swatch').style.background = LIVE_COLOR;
+    document.getElementById('info-name').textContent = callsign(a);
+    document.getElementById('info-dest').textContent =
+      [a.t ? `機材 ${a.t}` : '機材 不明', a.r ? `機体番号 ${a.r}` : ''].filter(Boolean).join(' ・ ');
+    const r = liveRunwayOf(a);
+    const move = p.ground
+      ? `地上を走行中（${Math.round((a.gs || 0) * 1.852)} km/h）`
+      : `高度 約${fmtInt(Math.round(p.alt / 10) * 10)} m ・ 速度 約${fmtInt(Math.round((a.gs || 0) * 1.852))} km/h`;
+    document.getElementById('info-status').textContent =
+      move + (r ? ` ・ ${r.airport.name} ${r.name} で${r.phase}（使用滑走路は推定）` : '');
+    document.getElementById('info-detail').textContent =
+      `実際の飛行機（ADS-B、${live.source}）・ ${Math.round(p.age)} 秒前の受信位置から推定` + (a.desc ? ` ・ ${a.desc}` : '');
+    document.getElementById('info-stops').replaceChildren();
+    const followBtn = document.getElementById('info-follow');
+    followBtn.textContent = state.follow ? '追跡をやめる' : 'この飛行機を追跡';
+    followBtn.setAttribute('aria-pressed', String(state.follow));
+    box.hidden = false;
+  }
+
+  function updateLiveSelection() {
+    const a = live.list.find(x => x.hex === live.selected);
+    if (a && state.follow && liveActive()) map.jumpTo({ center: livePosition(a).c });
+  }
+
+  // 空港のカード: 直近 10 分に観測した離着陸から、使っている滑走路を推定して表示する
+  function renderAirportLive(ap) {
+    const el = document.getElementById('airport-live');
+    if (!live.on) {
+      el.hidden = true;
+      return;
+    }
+    el.hidden = false;
+    const recent = (live.seen[ap.id] || []).filter(x => Date.now() - x.at < 10 * 60000).sort((x, y) => y.at - x.at);
+    live.seen[ap.id] = recent;
+    if (!liveActive()) {
+      el.textContent = '使用滑走路（ADS-B から推定）: 実時間・現在時刻のときに表示します';
+    } else if (!recent.length) {
+      el.textContent = '使用滑走路（ADS-B から推定）: この 10 分間に離着陸は観測されていません';
+    } else {
+      const ago = x => Math.max(0, Math.round((Date.now() - x.at) / 60000));
+      el.textContent = '使用滑走路（ADS-B から推定）: ' +
+        recent.slice(0, 3).map(x => `${x.name} ${x.phase}（${x.flight}・${ago(x) ? `${ago(x)}分前` : 'いま'}）`).join(' ／ ');
+    }
+  }
+
+  function renderLiveNote() {
+    const note = document.getElementById('live-note');
+    liveBtn.setAttribute('aria-pressed', String(live.on));
+    if (!live.on) {
+      note.hidden = true;
+      return;
+    }
+    note.hidden = false;
+    if (live.available === false) {
+      note.textContent = '実際の飛行機を表示するには、python -m http.server ではなく tools/serve.py で起動してください（README の「使い方」）。';
+    } else if (!liveRealtime()) {
+      note.textContent = '実際の飛行機は、時計が「実時間」で現在時刻のときだけ表示されます（「現在時刻」を押してください）。';
+    } else if (live.error) {
+      note.textContent = `ADS-B のデータを取得できません（${live.error}）。10 秒後にもう一度試します。`;
+    } else if (live.available) {
+      note.textContent = `実際の飛行機 ${live.list.length} 機を表示中（ADS-B、${live.source}・ODbL）。推計の航空便は隠しています。機体をクリックで便名・機材・推定の使用滑走路。`;
+    } else {
+      note.textContent = '実際の飛行機のデータを読み込み中…';
+    }
+  }
+
+  liveBtn.addEventListener('click', () => {
+    live.on = !live.on;
+    clearInterval(live.timer);
+    if (live.on) {
+      live.timer = setInterval(pollLive, LIVE_INTERVAL);
+      pollLive();
+    } else {
+      live.list = [];
+      live.selected = null;
+      renderInfo();
+    }
+    renderLiveNote();
+    if (state.airport) renderAirportFlights();
+  });
+  document.getElementById('now').addEventListener('click', () => { if (live.on) pollLive(); });
 
   // ---------------------------------------------------------------- 平日 / 土休日ダイヤ
   const dayBtn = document.getElementById('daytype');

@@ -83,7 +83,9 @@
           <button id="theme"></button>
           <button id="buildings" aria-pressed="true">3D建物</button>
           <button id="terrain" aria-pressed="false">地形</button>
+          <button id="live" aria-pressed="false" title="ADS-B のオープンデータで、実際の今の飛行機を表示（tools/serve.py で起動したとき）">実際の飛行機</button>
         </div>
+        <p id="live-note" class="note" hidden></p>
         <div class="row wrap">
           <button id="cinema">撮影モード</button>
           <button id="share">この景色を共有</button>
@@ -94,7 +96,7 @@
         キー操作: Space 一時停止 ／ 1〜4 倍速 ／ N 現在時刻 ／ C 撮影モード ／ F 追跡 ／ Esc 閉じる
       </p>
       <p class="note">
-        ことでん・とさでん交通・阿佐海岸鉄道と一部の旅客船は公開されている<strong>時刻表データ（GTFS）</strong>で、それ以外の鉄道・主なフェリー・航空便は<strong>運行パターンからの推計</strong>で動かしています。空港の乗降客数は国の統計（実データ）です。遅延は反映していません。
+        函館市電は公開されている<strong>時刻表データ（GTFS）</strong>で、それ以外の鉄道・フェリー・航空便は<strong>運行パターンからの推計</strong>で動かしています。空港の乗降客数は国の統計（実データ）です。遅延は反映していません。「実際の飛行機」をオンにすると、実時間のときに ADS-B のオープンデータで今の飛行機を表示します。
       </p>
     </div>
   </aside>
@@ -159,6 +161,7 @@
     </div>
     <div id="airport-meta" class="stat-sub"></div>
     <p id="airport-routes" class="stat-sub"></p>
+    <p id="airport-live" class="stat-sub" hidden></p>
     <div id="airport-stats" hidden>
     <div class="stat-big"><span id="airport-total"></span><small>乗降客数</small></div>
     <div id="airport-split" class="stat-sub"></div>
