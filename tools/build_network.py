@@ -4,21 +4,25 @@
 使い方:
     python3 tools/build_network.py
 
-駅の位置と並びは 駅データ.jp (piuccio/open-data-jp-railway-stations 経由) を使う。
+駅の並びは 駅データ.jp (piuccio/open-data-jp-railway-stations 経由)、
+駅の位置と線路の形は「国土数値情報（鉄道データ N02、2024 年度）」（国土交通省）を使う。
 取得したファイルは tools/cache/ に保存し、2 回目以降はそれを使う。
 
-線路の形は、いまは駅と駅を直線で結んだ概略。
 運転間隔・停車駅・フェリーや航空便の時刻は、すべて制作者による推計。
 """
+import heapq
 import json
 import math
 import os
+import unicodedata
 import urllib.request
+import zipfile
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 ROOT = os.path.dirname(HERE)
 CACHE = os.path.join(HERE, 'cache')
 STATIONS_URL = 'https://raw.githubusercontent.com/piuccio/open-data-jp-railway-stations/master/stations.json'
+N02_URL = 'https://nlftp.mlit.go.jp/ksj/gml/data/N02/N02-24/N02-24_GML.zip'
 
 R = 6371008.8
 
@@ -86,28 +90,20 @@ def load_stations():
 
 EKI = load_stations()
 
-# 駅データ.jp の収録後に廃止された駅 (2021・2022 年の廃止を反映。網羅的ではない)。
-# 廃止された区間は、下の LINES で使う区間を選ぶことで除いている
-CLOSED = {
-    # 2021 年 3 月
-    '11103': {'伊納'},
-    '11116': {'北日ノ出', '将軍山', '東雲', '生野'},
-    '11117': {'南斜里'},
-    '11108': {'初田牛'},
-    '11115': {'南比布', '北比布', '東六線', '北剣淵', '下士別', '北星', '南美深', '紋穂内', '豊清水', '安牛', '上幌延', '徳満'},
-    # 2022 年 3 月
-    '11101': {'池田園', '流山温泉', '銚子口', '石谷', '本石倉'},
-}
-
-# 駅データ.jp に無い駅
+# 駅データ.jp の収録後に改称された駅
+RENAMED = {'石狩太美': '太美', '石狩当別': '当別', '東風連': '名寄高校'}
+# 駅データ.jp に無い駅 (位置は国土数値情報から取る)
 EXTRA = {
     '奥津軽いまべつ': [140.5153, 41.1453],
 }
+# 駅データ.jp に無く、国土数値情報にある駅: 路線ごとに、いちばん近い区間へ挿入する
+ADDED = {'jr_sassho': ['ロイズタウン']}
+# 廃止された駅は、国土数値情報 (2024 年度) に無い JR の駅として自動で除く (refine_stations)。
+# 廃止された区間は、下の LINES で使う区間を選ぶことで除いている
 
 
 def station_list(line_id):
-    closed = CLOSED.get(line_id, set())
-    return [(n, c) for n, c in EKI[line_id] if n not in closed]
+    return [(RENAMED.get(n, n), c) for n, c in EKI[line_id]]
 
 
 def take(line_id, a, b):
@@ -134,6 +130,263 @@ def join(*parts):
     return out
 
 
+# ------------------------------------------------------------------ 国土数値情報 (鉄道データ)
+def norm(name):
+    return unicodedata.normalize('NFKC', name).replace('ヶ', 'ケ').replace('ヵ', 'カ')
+
+
+def midpoint(coords):
+    half, acc = path_length(coords) / 2, 0.0
+    for a, b in zip(coords, coords[1:]):
+        d = haversine(a, b)
+        if acc + d >= half and d > 0:
+            f = (half - acc) / d
+            return [a[0] + (b[0] - a[0]) * f, a[1] + (b[1] - a[1]) * f]
+        acc += d
+    return coords[0]
+
+
+def load_n02():
+    files = {k: os.path.join(CACHE, f'N02-24_{k}.geojson') for k in ('Station', 'RailroadSection')}
+    if not all(os.path.exists(p) for p in files.values()):
+        zpath = os.path.join(CACHE, 'N02-24_GML.zip')
+        if not os.path.exists(zpath):
+            print('download', N02_URL)
+            urllib.request.urlretrieve(N02_URL, zpath)
+        with zipfile.ZipFile(zpath) as z:
+            for k, p in files.items():
+                with z.open(f'UTF-8/N02-24_{k}.geojson') as src, open(p, 'wb') as dst:
+                    dst.write(src.read())
+
+    def near(coords):  # 北海道と青森県北部だけを使う
+        return any(139 < x < 146.5 and 40.5 < y < 46 for x, y in coords)
+
+    with open(files['Station'], encoding='utf-8') as f:
+        st = [(norm(x['properties']['N02_005']), x['properties']['N02_004'], x['properties']['N02_003'],
+               rnd(midpoint(x['geometry']['coordinates'])))
+              for x in json.load(f)['features'] if near(x['geometry']['coordinates'])]
+    with open(files['RailroadSection'], encoding='utf-8') as f:
+        rs = [(x['properties']['N02_004'], x['properties']['N02_003'], x['geometry']['coordinates'])
+              for x in json.load(f)['features'] if near(x['geometry']['coordinates'])]
+    return st, rs
+
+
+N02_STATIONS, N02_SECTIONS = load_n02()
+
+JR = {'北海道旅客鉄道'}
+# 路線ごとに使う国土数値情報の事業者と路線名 (路線名 None はその事業者の全路線)。
+# 路線名の先頭はその路線自身の線路で、駅はまずこの線路に吸着させる
+N02_OF = {
+    'subway_namboku': ({'札幌市'}, ['南北線']),
+    'subway_tozai': ({'札幌市'}, ['東西線']),
+    'subway_toho': ({'札幌市'}, ['東豊線']),
+    'sapporo_tram': ({'一般社団法人札幌市交通事業振興公社'}, None),
+    'hakodate_tram2': ({'函館市'}, None),
+    'hakodate_tram5': ({'函館市'}, None),
+    'jr_hakodate_s': (JR, ['函館線']),
+    'jr_hakodate_sawara': (JR, ['函館線']),
+    'jr_hakodate_yama': (JR, ['函館線']),
+    'jr_hakodate_n': (JR, ['函館線']),
+    'jr_muroran': (JR, ['室蘭線']),
+    'jr_muroran_branch': (JR, ['室蘭線']),
+    'jr_muroran_n': (JR, ['室蘭線', '千歳線']),
+    'jr_chitose': (JR, ['千歳線', '函館線', '室蘭線']),
+    'jr_chitose_airport': (JR, ['千歳線']),
+    'jr_sekisho': (JR, ['石勝線', '千歳線', '根室線']),
+    'jr_nemuro_w': (JR, ['根室線', '函館線']),
+    'jr_nemuro': (JR, ['根室線', '石勝線']),
+    'jr_hanasaki': (JR, ['根室線']),
+    'jr_hidaka': (JR, ['日高線', '室蘭線']),
+    'jr_sassho': (JR, ['札沼線', '函館線']),
+    'jr_furano': (JR, ['富良野線', '函館線', '根室線']),
+    'jr_soya': (JR, ['宗谷線', '函館線']),
+    'jr_sekihoku': (JR, ['石北線', '宗谷線', '函館線']),
+    'jr_senmo': (JR, ['釧網線', '根室線', '石北線']),
+    'shinkansen': ({'北海道旅客鉄道', '東日本旅客鉄道'}, ['北海道新幹線', '海峡線', '東北新幹線']),
+    'isaribi': ({'道南いさりび鉄道', '北海道旅客鉄道'}, ['道南いさりび鉄道線', '函館線']),
+}
+
+
+def refine_stations(line_id, stations):
+    """駅の位置を国土数値情報の駅 (ホームの中点) に合わせ、国土数値情報に無い JR の駅 (廃止駅) を除く"""
+    ops, names = N02_OF[line_id]
+    out = []
+    for n, c in stations:
+        # 同じ名前の駅が別の路線にもある (例: 地下鉄 さっぽろ) ので、その路線自身の駅を優先する
+        cands = [(names is not None and x[2] != names[0], haversine(c, x[3]), x[3]) for x in N02_STATIONS
+                 if x[0] == norm(n) and x[1] in ops and (names is None or x[2] in names)]
+        cands = [z for z in cands if z[1] < 3000]
+        if cands:
+            out.append((n, min(cands)[2]))
+        elif n in EXTRA or not ops & JR:
+            out.append((n, c))
+            if n not in EXTRA:
+                print(f'  {line_id}: {n} は国土数値情報に無いため、駅データ.jp の位置を使う')
+        else:
+            print(f'  {line_id}: {n} は国土数値情報 (2024 年度) に無いため除外')
+    for n in ADDED.get(line_id, []):
+        c = min((x for x in N02_STATIONS if x[0] == norm(n) and x[1] in ops),
+                key=lambda x: haversine(x[3], out[0][1]))[3]
+        # 挿入して増える距離がいちばん小さい区間に入れる
+        k = min(range(1, len(out)), key=lambda i: haversine(out[i - 1][1], c) + haversine(c, out[i][1]) - haversine(out[i - 1][1], out[i][1]))
+        out.insert(k, (n, c))
+    return out
+
+
+class TrackGraph:
+    """国土数値情報の線路 (LineString) をつないだグラフ。駅を最寄りの線路に吸着させ、駅間を最短経路で結ぶ"""
+    SNAP = 350   # 駅から線路までの距離の上限 [m]
+    LINK = 30    # 線路の端どうしがこれより近ければ、つながっているとみなす [m]
+    CELL = 0.02  # 空間索引のマス [度]
+
+    def __init__(self, ops, names):
+        self.pts, self.key = [], {}
+        self.segs = []  # (点 a, 点 b)
+        self.own = []   # その路線自身の線路か
+        for op, line, coords in N02_SECTIONS:
+            if op not in ops or (names is not None and line not in names):
+                continue
+            ids = [self._node(c) for c in coords]
+            for a, b in zip(ids, ids[1:]):
+                if a != b:
+                    self.segs.append((a, b))
+                    self.own.append(names is None or line == names[0])
+        self.grid = {}
+        for i, (a, b) in enumerate(self.segs):
+            for cell in self._cells(self.pts[a], self.pts[b]):
+                self.grid.setdefault(cell, []).append(i)
+        self.links = []
+        ends = {}
+        for a, b in self.segs:
+            for p in (a, b):
+                ends.setdefault(self._cell(self.pts[p]), set()).add(p)
+        for cell, ps in ends.items():
+            near = set().union(*(ends.get((cell[0] + dx, cell[1] + dy), set()) for dx in (-1, 0, 1) for dy in (-1, 0, 1)))
+            for p in ps:
+                for q in near:
+                    if p < q and haversine(self.pts[p], self.pts[q]) < self.LINK:
+                        self.links.append((p, q))
+        self.snaps = {}  # 線分 → [(t, 点)]
+
+    def _node(self, c):
+        k = (round(c[0], 6), round(c[1], 6))
+        if k not in self.key:
+            self.key[k] = len(self.pts)
+            self.pts.append(list(k))
+        return self.key[k]
+
+    def _cell(self, c):
+        return (int(c[0] // self.CELL), int(c[1] // self.CELL))
+
+    def _cells(self, a, b):
+        x0, y0 = self._cell([min(a[0], b[0]), min(a[1], b[1])])
+        x1, y1 = self._cell([max(a[0], b[0]), max(a[1], b[1])])
+        return [(x, y) for x in range(x0, x1 + 1) for y in range(y0, y1 + 1)]
+
+    def snap(self, c):
+        """c から最も近い線路上の点を、グラフの点として登録する。遠すぎれば None"""
+        cx, cy = self._cell(c)
+        kx = 111320 * math.cos(math.radians(c[1]))
+        best = None
+        for dx in (-1, 0, 1):
+            for dy in (-1, 0, 1):
+                for i in self.grid.get((cx + dx, cy + dy), []):
+                    a, b = self.pts[self.segs[i][0]], self.pts[self.segs[i][1]]
+                    ax, ay = (a[0] - c[0]) * kx, (a[1] - c[1]) * 110540
+                    bx, by = (b[0] - c[0]) * kx, (b[1] - c[1]) * 110540
+                    vx, vy = bx - ax, by - ay
+                    L2 = vx * vx + vy * vy
+                    t = 0.0 if L2 == 0 else max(0.0, min(1.0, -(ax * vx + ay * vy) / L2))
+                    d = math.hypot(ax + vx * t, ay + vy * t)
+                    # その路線自身の線路を優先する (乗換駅で隣の路線に吸着しないように)
+                    rank = (not (self.own[i] and d <= self.SNAP), d)
+                    if best is None or rank < best[3]:
+                        best = (d, i, t, rank)
+        if best is None or best[0] > self.SNAP:
+            return None
+        _, i, t, _ = best
+        a, b = self.segs[i]
+        if t <= 0:
+            return a
+        if t >= 1:
+            return b
+        pa, pb = self.pts[a], self.pts[b]
+        p = self._node([pa[0] + (pb[0] - pa[0]) * t, pa[1] + (pb[1] - pa[1]) * t])
+        self.snaps.setdefault(i, []).append((t, p))
+        return p
+
+    def build(self):
+        """吸着させた点で線分を分けて、隣接リストを作る"""
+        self.adj = [[] for _ in self.pts]
+
+        def edge(p, q):
+            d = haversine(self.pts[p], self.pts[q])
+            self.adj[p].append((q, d))
+            self.adj[q].append((p, d))
+        for i, (a, b) in enumerate(self.segs):
+            chain = [a] + [p for _, p in sorted(self.snaps.get(i, []))] + [b]
+            for p, q in zip(chain, chain[1:]):
+                if p != q:
+                    edge(p, q)
+        for p, q in self.links:
+            edge(p, q)
+
+    def route(self, s, t):
+        dist, prev = {s: 0.0}, {}
+        heap = [(0.0, s)]
+        while heap:
+            d, u = heapq.heappop(heap)
+            if u == t:
+                break
+            if d > dist[u]:
+                continue
+            for v, w in self.adj[u]:
+                nd = d + w
+                if nd < dist.get(v, float('inf')):
+                    dist[v], prev[v] = nd, u
+                    heapq.heappush(heap, (nd, v))
+        if t not in dist:
+            return None
+        path = [t]
+        while path[-1] != s:
+            path.append(prev[path[-1]])
+        return [self.pts[p] for p in reversed(path)]
+
+
+def track_shapes(line_id, stations):
+    """駅と駅の間の線路の形 (途中の点の並び) を、区間ごとに返す"""
+    g = TrackGraph(*N02_OF[line_id])
+    nodes = [g.snap(c) for _, c in stations]
+    g.build()
+    shapes = []
+    for k in range(len(stations) - 1):
+        (na, ca), (nb, cb) = stations[k], stations[k + 1]
+        straight = haversine(ca, cb)
+        via = None
+        if nodes[k] is not None and nodes[k + 1] is not None:
+            via = g.route(nodes[k], nodes[k + 1])
+            if via is None:
+                print(f'  {line_id}: {na}〜{nb} は線路がつながっていないため直線にする')
+        else:
+            print(f'  {line_id}: {na}〜{nb} は線路に吸着できないため直線にする')
+        if via is not None:
+            ratio = path_length([ca] + via + [cb]) / max(straight, 1)
+            if ratio > 2.5 and straight > 500:
+                print(f'  {line_id}: {na}〜{nb} の経路が遠回り ({ratio:.1f} 倍) のため直線にする')
+                via = None
+        if via is None:
+            shapes.append([])
+            continue
+        # 端の点が駅とほぼ同じ位置なら省く
+        via = [rnd(p) for p in via]
+        if via and haversine(via[0], ca) < 5:
+            via = via[1:]
+        if via and haversine(via[-1], cb) < 5:
+            via = via[:-1]
+        shapes.append(via)
+    return shapes
+
+
 # ------------------------------------------------------------------ 路線 (線路)
 GROUPS = [
     {'id': 'sapporo_subway', 'name': '札幌市営地下鉄'},
@@ -148,7 +401,7 @@ GROUPS = [
 JR_COLOR = '#43A047'
 
 hakodate_main = join(take('11101', '函館', '駒ケ岳'), pick('11101', '森'), take('11101', '森', '長万部'))
-hakodate_sawara = join(pick('11101', '大沼'), take('11101', '鹿部', '東森'), pick('11101', '森'))
+hakodate_sawara = join(pick('11101', '大沼'), take('11101', '池田園', '東森'), pick('11101', '森'))
 muroran_main = join(take('11104', '長万部', '本輪西'), take('11104', '東室蘭', '苫小牧'))
 muroran_branch = pick('11104', '東室蘭', '輪西', '御崎', '母恋', '室蘭')
 chitose_main = join(pick('11109', '沼ノ端', '植苗'), take('11109', '南千歳', '白石'), pick('11109', '苗穂', '札幌'))
@@ -189,6 +442,9 @@ LINES = [
     ('shinkansen', '北海道新幹線 (新函館北斗〜新青森)', 'JR北海道', 'jr_ltd', 'rail', '#7B5EA7', shinkansen),
     ('isaribi', '道南いさりび鉄道線', '道南いさりび鉄道', 'hokkaido_other', 'rail', '#1565C0', station_list('99108')),
 ]
+print('国土数値情報で駅の位置と線路の形を合わせる')
+LINES = [(*l[:6], refine_stations(l[0], l[6])) for l in LINES]
+SHAPES = {l[0]: track_shapes(l[0], l[6]) for l in LINES}
 LINE = {l[0]: l for l in LINES}
 
 
@@ -197,17 +453,37 @@ def stations_of(line_id):
 
 
 def seg(line_id, a, b):
+    """路線の a 駅から b 駅まで。各駅に、直前の駅からの線路の形 (途中の点) を添えて返す"""
     lst = stations_of(line_id)
+    shapes = SHAPES[line_id]
     names = [n for n, _ in lst]
     i, j = names.index(a), names.index(b)
-    return lst[i:j + 1] if i <= j else list(reversed(lst[j:i + 1]))
+    if i <= j:
+        return [(lst[k][0], lst[k][1], shapes[k - 1] if k > i else []) for k in range(i, j + 1)]
+    return [(lst[k][0], lst[k][1], list(reversed(shapes[k])) if k < i else []) for k in range(i, j - 1, -1)]
+
+
+def rows_of(path, stops=None):
+    """seg をつないだ経路を、sim.js の path ([名前, 座標, 停車]) にする。途中の点は名前なし"""
+    rows = []
+    for i, (n, c, via) in enumerate(path):
+        rows.extend(['', p, 0] for p in via)
+        stop = 1 if stops is None or n in stops or i in (0, len(path) - 1) else 0
+        rows.append([n, c, stop])
+    return rows
+
+
+def shape_of(line_id):
+    path = seg(line_id, stations_of(line_id)[0][0], stations_of(line_id)[-1][0]) if line_id != 'sapporo_tram' else \
+        [(n, c, SHAPES[line_id][k - 1] if k else []) for k, (n, c) in enumerate(stations_of(line_id))]
+    return [r[1] for r in rows_of(path)]
 
 
 # ------------------------------------------------------------------ 運行系統
 RAIL = {'kind': 'rail', 'cars': 2, 'carLength': 21, 'width': 2.9, 'height': 4.0, 'speed': 75, 'dwell': 30, 'accel': 30}
 LOCAL1 = {**RAIL, 'cars': 1}
-# 線路を直線で結んでいて実際より短いので、最高速度は控えめにして所要時間を実際に近づける
-LTD = {**RAIL, 'cars': 5, 'speed': 90, 'dwell': 60, 'accel': 40}
+# 特急の最高速度は、主な区間の所要時間が実際に近くなるよう系統ごとに調整している (LIMITED の speed)
+LTD = {**RAIL, 'cars': 5, 'speed': 100, 'dwell': 60, 'accel': 40}
 SUBWAY = {'kind': 'rail', 'cars': 6, 'carLength': 18, 'width': 3.1, 'height': 3.7, 'speed': 50, 'dwell': 20, 'accel': 15}
 TRAM = {'kind': 'tram', 'cars': 1, 'carLength': 13, 'width': 2.4, 'height': 3.8, 'speed': 16, 'dwell': 20, 'accel': 8}
 
@@ -217,14 +493,11 @@ services = []
 def service(sid, name, group, line, color, legs, spec, stops=None, **extra):
     """legs: [(路線, 始点, 終点), ...] をつないだ経路。stops を省くと各駅に停車"""
     path = join(*[seg(*leg) for leg in legs])
-    names = [n for n, _ in path]
+    names = [s[0] for s in path]
     if stops is not None:
         missing = [s for s in stops if s not in names]
         assert not missing, (sid, missing)
-    rows = []
-    for i, (n, c) in enumerate(path):
-        stop = 1 if stops is None or n in stops or i in (0, len(path) - 1) else 0
-        rows.append([n, c, stop])
+    rows = rows_of(path, stops)
     sv = {'id': sid, 'name': name, 'group': group, 'line': line, 'color': color, **spec,
           'loop': False, 'both': True, 'offset': 0, 'path': rows}
     sv.update(extra)
@@ -241,7 +514,7 @@ service('toho', '東豊線', 'sapporo_subway', 'subway_toho', '#0091D5', [('subw
         {**SUBWAY, 'cars': 4}, bands=[['06:00', '07:30', 8], ['07:30', '09:00', 5], ['09:00', '17:00', 8], ['17:00', '19:30', 6], ['19:30', '24:00', 10]])
 
 # 札幌市電 (ループ線を外回り・内回りで運転)
-loop = [[n, c, 1] for n, c in sapporo_tram]
+loop = rows_of([(n, c, SHAPES['sapporo_tram'][k - 1] if k else []) for k, (n, c) in enumerate(stations_of('sapporo_tram'))])
 for sid, name, path in (('sapporo_tram_out', '外回り', loop), ('sapporo_tram_in', '内回り', list(reversed(loop)))):
     services.append({'id': sid, 'name': f'札幌市電 {name}', 'group': 'tram', 'line': 'sapporo_tram', 'color': '#7CB342', **TRAM,
                      'loop': True, 'both': False, 'offset': 0 if sid.endswith('out') else 3, 'path': path,
@@ -317,19 +590,19 @@ LIMITED = [
      {'bands': [['07:00', '21:00', 150]], 'offset': 20}),
     ('lilac', '特急 ライラック・カムイ', [('jr_hakodate_n', '札幌', '旭川')], '#2E7D32',
      ['札幌', '岩見沢', '美唄', '砂川', '滝川', '深川', '旭川'],
-     {'bands': [['06:30', '22:30', 30]]}),
+     {'bands': [['06:30', '22:30', 30]], 'speed': 125}),
     ('soya', '特急 宗谷', [('jr_hakodate_n', '札幌', '旭川'), ('jr_soya', '旭川', '稚内')], '#FFB300',
      ['札幌', '岩見沢', '滝川', '深川', '旭川', '和寒', '士別', '名寄', '美深', '音威子府', '幌延', '豊富', '南稚内', '稚内'],
-     {'departures': ['07:30'], 'departuresReturn': ['17:45']}),
+     {'departures': ['07:30'], 'departuresReturn': ['17:45'], 'speed': 85}),
     ('sarobetsu', '特急 サロベツ', [('jr_soya', '旭川', '稚内')], '#FFD54F',
      ['旭川', '和寒', '士別', '名寄', '美深', '音威子府', '幌延', '豊富', '南稚内', '稚内'],
-     {'departures': ['12:45', '18:00'], 'departuresReturn': ['06:40', '13:30']}),
+     {'departures': ['12:45', '18:00'], 'departuresReturn': ['06:40', '13:30'], 'speed': 80}),
     ('okhotsk', '特急 オホーツク', [('jr_hakodate_n', '札幌', '旭川'), ('jr_sekihoku', '旭川', '網走')], '#26A69A',
      ['札幌', '岩見沢', '滝川', '深川', '旭川', '上川', '丸瀬布', '遠軽', '生田原', '留辺蘂', '北見', '端野', '美幌', '女満別', '網走'],
-     {'departures': ['06:50', '17:30'], 'departuresReturn': ['06:20', '17:25']}),
+     {'departures': ['06:50', '17:30'], 'departuresReturn': ['06:20', '17:25'], 'speed': 78}),
     ('taisetsu', '特急 大雪', [('jr_sekihoku', '旭川', '網走')], '#80CBC4',
      ['旭川', '上川', '丸瀬布', '遠軽', '生田原', '留辺蘂', '北見', '端野', '美幌', '女満別', '網走'],
-     {'departures': ['10:40', '18:10'], 'departuresReturn': ['09:30', '13:40']}),
+     {'departures': ['10:40', '18:10'], 'departuresReturn': ['09:30', '13:40'], 'speed': 72}),
     ('oozora', '特急 おおぞら', [('jr_chitose', '札幌', '南千歳'), ('jr_sekisho', '南千歳', '新得'), ('jr_nemuro', '新得', '釧路')], '#1E88E5',
      ['札幌', '新札幌', '南千歳', '追分', 'トマム', '新得', '芽室', '帯広', '池田', '浦幌', '白糠', '釧路'],
      {'bands': [['06:50', '19:30', 150]]}),
@@ -666,21 +939,21 @@ for ap in AIRPORTS:
 
 # ------------------------------------------------------------------ 出力
 lines_out = [{'id': lid, 'name': name, 'operator': op, 'group': grp, 'kind': kind, 'color': color,
-              'stations': [[n, c] for n, c in sts]} for lid, name, op, grp, kind, color, sts in LINES]
+              'stations': [[n, c] for n, c in sts], 'shape': shape_of(lid)} for lid, name, op, grp, kind, color, sts in LINES]
 lines_out += FERRY_LINES
 
 with open(os.path.join(HERE, 'holidays.json'), encoding='utf-8') as f:
     holidays = json.load(f)
 
 network = {
-    'source': '駅の位置と並び: 駅データ.jp',
+    'source': '駅の位置: 国土数値情報（鉄道データ）、駅の並び: 駅データ.jp',
     'groups': GROUPS,
     'lines': lines_out,
     'services': services,
     'airports': airports,
     'calendar': {'holidays': holidays},
     'credits': [],
-    'trackSource': '駅間を直線で結んだ概略',
+    'trackSource': '国土数値情報（鉄道データ）',
 }
 
 out = os.path.join(ROOT, 'data', 'network.js')

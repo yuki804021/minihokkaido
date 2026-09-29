@@ -104,7 +104,7 @@
     compact: true,
     customAttribution: [
       ...(NET.trackSource === '国土数値情報（鉄道データ）'
-        ? ['駅・線路・空港: 「<a href="https://nlftp.mlit.go.jp/ksj/" target="_blank">国土数値情報</a>」（国土交通省）を加工して作成']
+        ? ['駅・線路: 「<a href="https://nlftp.mlit.go.jp/ksj/" target="_blank">国土数値情報</a>」（国土交通省）を加工して作成']
         : NET.trackSource ? [`線路: ${NET.trackSource}`] : []),
       '駅の並び: <a href="https://ekidata.jp/" target="_blank">駅データ.jp</a>',
       ...(NET.credits && NET.credits.length
