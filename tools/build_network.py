@@ -736,10 +736,47 @@ def highway_services(zpath, prefix, keep_route=None):
         out.append({**BUS, 'id': sid, 'name': f'高速バス {long_name}', 'group': 'highway_bus', 'line': sid,
                     'color': HIGHWAY_COLOR, 'loop': False, 'both': False, 'offset': 0, 'path': rows, 'trips': trip_rows,
                     'note': f'運行: {op}' if op else ''})
+        # 地図に描く線は、あとで全系統の経路から重複を除いて 1 本にまとめる (highway_network)。
+        # 系統ごとの線は停留所の印と検索のためだけに使う
         HIGHWAY_LINES.append({'id': sid, 'name': f'高速バス {long_name}', 'operator': op, 'group': 'highway_bus', 'kind': 'bus',
-                              'color': HIGHWAY_COLOR, 'stations': [[n, c] for n, c in zip(names, coords)],
-                              'shape': [r[1] for r in rows]})
+                              'color': HIGHWAY_COLOR, 'stations': [[n, c] for n, c in zip(names, coords)], 'noShape': True,
+                              '_path': [r[1] for r in rows]})
     return out
+
+
+def highway_network(lines):
+    """高速バスの経路は同じ道路を何系統も通るので、重なる区間を 1 回だけ描けるよう、重複しない線分をつないだ線の集まりにする"""
+    key = lambda c: (round(c[0], 4), round(c[1], 4))
+    point, adj = {}, {}
+    for l in lines:
+        path = l.pop('_path')
+        for a, b in zip(path, path[1:]):
+            ka, kb = key(a), key(b)
+            if ka == kb:
+                continue
+            point.setdefault(ka, a)
+            point.setdefault(kb, b)
+            adj.setdefault(ka, set()).add(kb)
+            adj.setdefault(kb, set()).add(ka)
+    used, chains = set(), []
+    # 端 (つながる線分が 1 本) や分岐点から順にたどり、残った輪もたどる
+    starts = [k for k, v in adj.items() if len(v) != 2] + list(adj)
+    for s0 in starts:
+        for n0 in sorted(adj[s0]):
+            if (s0, n0) in used:
+                continue
+            chain, prev, cur = [s0], s0, n0
+            used.update({(s0, n0), (n0, s0)})
+            chain.append(cur)
+            while len(adj[cur]) == 2:
+                nxt = next(x for x in adj[cur] if x != prev)
+                if (cur, nxt) in used:
+                    break
+                used.update({(cur, nxt), (nxt, cur)})
+                prev, cur = cur, nxt
+                chain.append(cur)
+            chains.append([point[k] for k in chain])
+    return chains
 
 
 try:
@@ -749,6 +786,8 @@ try:
     highway += highway_services(gu.fetch(NEMURO_GTFS_URL, 'nemuro_bus.zip'), 'hwy_nemuro',
                                 keep_route=lambda r: r['route_id'] in NEMURO_HIGHWAY_ROUTES)
     services.extend(highway)
+    HIGHWAY_LINES.append({'id': 'highway_network', 'name': '都市間高速バスの経路', 'operator': '', 'group': 'highway_bus',
+                          'kind': 'bus', 'color': HIGHWAY_COLOR, 'stations': [], 'multiShape': highway_network(HIGHWAY_LINES)})
     CREDITS.append('北海道オープンデータプラットフォーム 高速バス GTFS')
     CREDITS.append('根室交通 GTFS')
     print(f'  都市間高速バス: {len(highway)} 系統、{sum(len(s["trips"]) for s in highway)} 便')

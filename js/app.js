@@ -54,6 +54,8 @@
     // auto: 太陽の高さに合わせて昼はライト、夜はダークの地図に切り替える
     themeMode: ['light', 'dark'].includes(params.get('theme')) ? params.get('theme') : 'auto',
     theme: 'light',
+    // 軽量モード: 3D 建物・地形・夜の灯りを消し、車両の立体表示と更新回数を減らす (?lite か、前回の設定)
+    lite: params.has('lite') || storedLite(),
     buildings: true,
     terrain: params.has('terrain'),
     groups: Object.fromEntries(NET.groups.map(g => [g.id, true])),
@@ -67,8 +69,20 @@
   };
   // 実際の飛行機 (ADS-B) の状態。処理は「実際の飛行機 (ADS-B)」の節
   const live = { on: false, available: null, list: [], source: '', fetchedAt: 0, error: '', selected: null, seen: {}, timer: null, busy: false };
+  if (state.lite) {
+    state.buildings = false;
+    state.terrain = false;
+  }
   if (params.get('t')) state.clock.base = parseTime(params.get('t'));
   if (params.get('speed')) state.clock.speed = Number(params.get('speed')) || 1;
+
+  function storedLite() {
+    try {
+      return localStorage.getItem('mh3d-lite') === '1';
+    } catch (e) {
+      return false;
+    }
+  }
 
   function jstNow() {
     const now = Date.now() / 1000 + 9 * 3600;
@@ -186,7 +200,7 @@
     const BUS_COLOR = dark ? '#c9a58f' : '#8d6e63';
     map.addSource('bus-routes', { type: 'geojson', data: busRoutesGeoJSON() });
     map.addLayer({
-      id: 'bus-routes', type: 'line', source: 'bus-routes', minzoom: 8,
+      id: 'bus-routes', type: 'line', source: 'bus-routes', minzoom: state.lite ? BUS_ROUTE_ZOOM_LITE : BUS_ROUTE_ZOOM,
       layout: { 'line-cap': 'round', 'line-join': 'round' },
       paint: {
         'line-color': BUS_COLOR,
@@ -203,7 +217,7 @@
       paint: {
         'line-color': dark ? '#000' : '#fff',
         'line-width': ['interpolate', ['linear'], ['zoom'], 7, 2.5, 12, 4, 16, 9],
-        'line-opacity': ['case', ['==', ['get', 'kind'], 'bus'], 0, 0.7], // 高速バスは縁取りなし
+        'line-opacity': 0.7,
       },
     });
     map.addLayer({
@@ -391,6 +405,19 @@
         'fill-extrusion-vertical-gradient': true,
       },
     });
+    // 引いた視点の車両 (立体の代わりに丸で描く。立体より描画がずっと軽い)
+    map.addSource('train-points', { type: 'geojson', data: empty() });
+    map.addLayer({
+      id: 'train-points', type: 'circle', source: 'train-points',
+      paint: {
+        'circle-radius': ['interpolate', ['linear'], ['zoom'], 6, 2.5, 10, 3.5, 14, 5.5],
+        'circle-color': ['get', 'color'],
+        'circle-stroke-color': dark ? '#0b0e13' : '#ffffff',
+        'circle-stroke-width': ['interpolate', ['linear'], ['zoom'], 6, 0.6, 12, 1.2],
+        'circle-pitch-alignment': 'map',
+      },
+    });
+    drawMode = '';
     map.addSource('train-lights', { type: 'geojson', data: empty() });
     map.addLayer({
       id: 'train-lights', type: 'circle', source: 'train-lights',
@@ -410,10 +437,13 @@
   function tracksGeoJSON() {
     return {
       type: 'FeatureCollection',
-      features: NET.lines.map(l => ({
+      // noShape の線 (高速バスの系統ごとの線) は描かず、重複を除いた経路 (multiShape) をまとめて描く
+      features: NET.lines.filter(l => !l.noShape).map(l => ({
         type: 'Feature',
         properties: { id: l.id, name: l.name, color: l.color, group: l.group, kind: l.kind },
-        geometry: { type: 'LineString', coordinates: l.shape || l.stations.map(s => s[1]) },
+        geometry: l.multiShape
+          ? { type: 'MultiLineString', coordinates: l.multiShape }
+          : { type: 'LineString', coordinates: l.shape || l.stations.map(s => s[1]) },
       })),
     };
   }
@@ -431,6 +461,8 @@
     return { type: 'FeatureCollection', features };
   }
 
+  // 路線バスの路線図を描き始めるズーム (路線が 1 万 6 千本あり、広域で描くと重いため)
+  const BUS_ROUTE_ZOOM = 10.5, BUS_ROUTE_ZOOM_LITE = 13;
   const BUS = window.BUS_MAP || { operators: [], routeNames: [], stops: [], lines: [], timetables: [], ttStops: [] };
 
   function busRoutesGeoJSON() {
@@ -475,7 +507,7 @@
     const f = ['in', ['get', 'group'], ['literal', [...lineGroups]]];
     const notShip = ['!=', ['get', 'kind'], 'ship'];
     map.setFilter('tracks', ['all', f, notShip]);
-    map.setFilter('tracks-casing', ['all', f, notShip]);
+    map.setFilter('tracks-casing', ['all', f, notShip, ['!=', ['get', 'kind'], 'bus']]); // 高速バスには縁取りを描かない
     map.setFilter('ferry-routes', ['all', f, ['==', ['get', 'kind'], 'ship']]);
     for (const id of ['bus-routes', 'bus-stops', 'bus-stop-labels']) {
       map.setLayoutProperty(id, 'visibility', state.groups.route_bus ? 'visible' : 'none');
@@ -757,25 +789,61 @@
     });
   }
 
+  // 車両を立体で描くズーム (それより引いた視点では丸で描く)。軽量モードでは、かなり拡大したときだけ立体にする
+  const SOLID_ZOOM = 11.5, SOLID_ZOOM_LITE = 14;
+  // 車両の位置を更新する間隔 [ms]: 通常 約 15 回/秒、軽量モード 10 回/秒、地図を動かしている間 約 7 回/秒
+  const FRAME_MS = 66, FRAME_MS_LITE = 100, FRAME_MS_MOVING = 150;
   let lastTrains = [];
   let lastFrame = 0;
+  let mapMoving = false;
+  let drawMode = ''; // 'solid' | 'points' (切り替わったときだけ、使わないほうを空にする)
+  let lastDrawKey = '';
+  map.on('movestart', () => { mapMoving = true; });
+  map.on('moveend', () => { mapMoving = false; lastDrawKey = ''; });
+
+  function vehiclePoint(tr) {
+    return { type: 'Feature', properties: { id: tr.id, color: tr.service.color }, geometry: { type: 'Point', coordinates: tr.pattern.pointAt(tr.dist).c } };
+  }
+
   function frame(now) {
     requestAnimationFrame(frame);
-    if (now - lastFrame < 33) return; // 約 30fps
+    if (document.hidden) return; // 裏のタブでは描かない
+    const interval = mapMoving ? FRAME_MS_MOVING : state.lite ? FRAME_MS_LITE : FRAME_MS;
+    if (now - lastFrame < interval) return;
     lastFrame = now;
     const t = simTime();
     document.getElementById('clock').textContent = formatTime(t);
     document.getElementById('cinema-clock').textContent = formatTime(t).slice(0, 5);
     if (!map.getSource('trains')) return;
+    // 一時停止中で、表示の条件も変わっていなければ、描き直さない
+    const zoom = map.getZoom();
+    const drawKey = state.clock.paused && !mapMoving && !live.on
+      ? [Math.round(t), Math.round(zoom * 20), state.lite, state.selected, sim.dayType, state.theme, JSON.stringify(state.groups)].join('|') : '';
+    if (drawKey && drawKey === lastDrawKey) return;
+    lastDrawKey = drawKey;
     updateSun(((t % 86400) + 86400) % 86400);
     // 実際の飛行機 (ADS-B) を表示している間は、推計の航空便を隠す
     const showLive = liveActive();
     const trains = sim.trainsAt(((t % 86400) + 86400) % 86400, sv => state.groups[sv.group] && !(showLive && sv.kind === 'plane'));
     lastTrains = trains;
-    const drawn = trainFeatures(visibleTrains(trains), sizeScale());
-    if (showLive) liveFeatures(sizeScale(), drawn.trains.features, drawn.lights.features);
-    map.getSource('trains').setData(drawn.trains);
-    map.getSource('train-lights').setData(state.night > 0.05 ? drawn.lights : empty());
+    const shown = visibleTrains(trains);
+    if (zoom >= (state.lite ? SOLID_ZOOM_LITE : SOLID_ZOOM)) {
+      const drawn = trainFeatures(shown, sizeScale());
+      if (showLive) liveFeatures(sizeScale(), drawn.trains.features, drawn.lights.features);
+      map.getSource('trains').setData(drawn.trains);
+      map.getSource('train-lights').setData(state.night > 0.05 && !state.lite ? drawn.lights : empty());
+      if (drawMode !== 'solid') map.getSource('train-points').setData(empty());
+      drawMode = 'solid';
+    } else {
+      const points = shown.map(vehiclePoint);
+      if (showLive) points.push(...livePoints());
+      map.getSource('train-points').setData({ type: 'FeatureCollection', features: points });
+      if (drawMode !== 'points') {
+        map.getSource('trains').setData(empty());
+        map.getSource('train-lights').setData(empty());
+      }
+      drawMode = 'points';
+    }
     document.getElementById('train-count').textContent = String(trains.length);
     updateSelection(trains, t);
     if (live.selected) updateLiveSelection();
@@ -792,7 +860,12 @@
   requestAnimationFrame(frame);
 
   // ---------------------------------------------------------------- 列車の選択
-  map.on('click', 'trains', e => {
+  map.on('click', 'train-points', e => onVehicleClick(e));
+  map.on('mouseenter', 'train-points', () => { map.getCanvas().style.cursor = 'pointer'; });
+  map.on('mouseleave', 'train-points', () => { map.getCanvas().style.cursor = ''; });
+  map.on('click', 'trains', e => onVehicleClick(e));
+  function onVehicleClick(e) {
+    if (e.defaultPrevented) return;
     const id = e.features[0].properties.id;
     // 実際の飛行機は id が live:<機体の ICAO アドレス>
     live.selected = id.startsWith('live:') ? id.slice(5) : null;
@@ -802,7 +875,7 @@
     e.preventDefault();
     renderInfo();
     renderStation();
-  });
+  }
   for (const layer of ['airport-points', 'airport-area']) {
     map.on('click', layer, e => {
       if (e.defaultPrevented) return;
@@ -1417,7 +1490,9 @@
   const themeBtn = document.getElementById('theme');
   const buildingsBtn = document.getElementById('buildings');
   const terrainBtn = document.getElementById('terrain');
+  const liteBtn = document.getElementById('lite');
   function renderToggles() {
+    liteBtn.setAttribute('aria-pressed', String(state.lite));
     document.documentElement.dataset.theme = state.theme;
     themeBtn.textContent = { auto: '地図: 自動（昼夜）', light: '地図: ライト', dark: '地図: ダーク' }[state.themeMode];
     buildingsBtn.setAttribute('aria-pressed', String(state.buildings));
@@ -1443,6 +1518,20 @@
     renderToggles();
     applyTerrain();
     if (state.terrain && map.getPitch() < 50) map.easeTo({ pitch: 60 });
+  });
+  liteBtn.addEventListener('click', () => {
+    state.lite = !state.lite;
+    try {
+      localStorage.setItem('mh3d-lite', state.lite ? '1' : '0');
+    } catch (e) { /* 保存できなくても動作には影響しない */ }
+    // 軽量モードでは 3D 建物と地形を消す。戻すときは 3D 建物だけ戻す (地形は元々オフ)
+    state.buildings = !state.lite;
+    if (state.lite) state.terrain = false;
+    applyBuildingVisibility();
+    applyTerrain();
+    if (map.getLayer('bus-routes')) map.setLayerZoomRange('bus-routes', state.lite ? BUS_ROUTE_ZOOM_LITE : BUS_ROUTE_ZOOM, 24);
+    lastDrawKey = '';
+    renderToggles();
   });
   renderToggles();
 
@@ -1614,6 +1703,11 @@
     const c = a.gs && age > 0 ? offset([a.lon, a.lat], brg, a.gs * KT * age) : [a.lon, a.lat];
     const altFt = ground ? 0 : (typeof a.alt_baro === 'number' ? a.alt_baro : (a.alt_geom || 0));
     return { c, brg, alt: Math.max(0, altFt * FT), ground, age };
+  }
+
+  function livePoints() {
+    return live.list.map(a => ({ type: 'Feature', properties: { id: `live:${a.hex}`, color: a.hex === live.selected ? '#ff6d00' : LIVE_COLOR },
+      geometry: { type: 'Point', coordinates: livePosition(a).c } }));
   }
 
   function liveFeatures(scale, features, lights) {
