@@ -129,6 +129,8 @@ tools/serve.py          手元で開くための簡易サーバ (実際の飛行
 tools/build_bus.py      路線バスの路線図・停留所・時刻表 (data/bus_map.js, data/bus/) を作るスクリプト
 data/bus_map.js         路線バスの路線図・停留所 (自動生成)
 data/bus/*.json         路線バスの時刻表 (事業者ごと。停留所をクリックしたときに読み込む)
+models/                 車両の 3D 模型 (glTF) と確認用のビューア (models/README.md。地図への組み込みはこれから)
+tools/models/build_models.py  車両の簡易 3D 模型を寸法と塗装の設定から作るスクリプト
 ```
 
 - 地図: [MapLibre GL JS](https://maplibre.org/) + [OpenFreeMap](https://openfreemap.org/) (OpenStreetMap ベース、API キー不要)。

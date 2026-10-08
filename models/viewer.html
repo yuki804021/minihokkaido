@@ -1,0 +1,125 @@
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>車両模型ビューア — Mini Hokkaido 3D</title>
+  <style>
+    :root { --bg: #e9edf1; --panel: #ffffff; --text: #1d2733; --muted: #5b6673; --accent: #1e88e5; }
+    @media (prefers-color-scheme: dark) { :root { --bg: #11151b; --panel: #1b212a; --text: #e8ecf1; --muted: #9aa5b1; } }
+    html, body { margin: 0; height: 100%; background: var(--bg); color: var(--text); font-family: system-ui, sans-serif; }
+    #view { position: fixed; inset: 0; }
+    #panel { position: fixed; top: 16px; left: 16px; max-width: 320px; background: var(--panel); border-radius: 12px; padding: 14px 16px;
+      box-shadow: 0 4px 18px rgba(0,0,0,.15); }
+    h1 { font-size: 16px; margin: 0 0 8px; }
+    .row { display: flex; flex-wrap: wrap; gap: 6px; margin: 8px 0; }
+    button { border: 1px solid #c5ccd4; background: transparent; color: var(--text); border-radius: 8px; padding: 6px 10px; cursor: pointer; font-size: 13px; }
+    button[aria-pressed="true"] { background: var(--accent); color: #fff; border-color: var(--accent); }
+    p { font-size: 12px; color: var(--muted); margin: 6px 0 0; line-height: 1.5; }
+  </style>
+  <script type="importmap">
+    { "imports": { "three": "https://cdn.jsdelivr.net/npm/three@0.169.0/build/three.module.js",
+                   "three/addons/": "https://cdn.jsdelivr.net/npm/three@0.169.0/examples/jsm/" } }
+  </script>
+</head>
+<body>
+  <div id="view"></div>
+  <div id="panel">
+    <h1>車両模型ビューア</h1>
+    <div class="row" id="buttons"></div>
+    <p id="info"></p>
+    <p>ドラッグで回転、ホイールで拡大・縮小。模型は <code>tools/models/build_models.py</code> で作ります（単位はメートル、+Z が前）。</p>
+  </div>
+  <script type="module">
+    import * as THREE from 'three';
+    import { OrbitControls } from 'three/addons/controls/OrbitControls.js';
+    import { GLTFLoader } from 'three/addons/loaders/GLTFLoader.js';
+    import { RoomEnvironment } from 'three/addons/environments/RoomEnvironment.js';
+
+    const el = document.getElementById('view');
+    const renderer = new THREE.WebGLRenderer({ antialias: true });
+    renderer.setPixelRatio(window.devicePixelRatio);
+    renderer.toneMapping = THREE.ACESFilmicToneMapping; // 白い車体が白飛びしないように
+    renderer.toneMappingExposure = 0.9;
+    el.appendChild(renderer.domElement);
+    const scene = new THREE.Scene();
+    const dark = matchMedia('(prefers-color-scheme: dark)').matches;
+    scene.background = new THREE.Color(dark ? 0x11151b : 0xe9edf1);
+    // 金属 (ステンレス車体) が映り込む周囲の光
+    scene.environment = new THREE.PMREMGenerator(renderer).fromScene(new RoomEnvironment(), 0.04).texture;
+    scene.environmentIntensity = 0.5;
+    const camera = new THREE.PerspectiveCamera(35, 1, 0.1, 500);
+    const controls = new OrbitControls(camera, renderer.domElement);
+    scene.add(new THREE.HemisphereLight(0xffffff, 0x445566, 0.6));
+    const sun = new THREE.DirectionalLight(0xffffff, 1.8);
+    sun.position.set(20, 30, 25);
+    scene.add(sun);
+    // レールと地面
+    const ground = new THREE.Mesh(new THREE.PlaneGeometry(200, 200), new THREE.MeshStandardMaterial({ color: dark ? 0x2a3038 : 0x7d8a96, roughness: 1 }));
+    ground.rotation.x = -Math.PI / 2;
+    scene.add(ground);
+    for (const x of [-0.5335, 0.5335]) {
+      const rail = new THREE.Mesh(new THREE.BoxGeometry(0.07, 0.15, 200), new THREE.MeshStandardMaterial({ color: 0x777777, metalness: 0.8, roughness: 0.4 }));
+      rail.position.set(x, 0.075, 0);
+      scene.add(rail);
+    }
+
+    const loader = new GLTFLoader();
+    const cache = new Map();
+    const load = file => cache.get(file) || cache.set(file, loader.loadAsync('../' + file).then(g => g.scene)).get(file);
+    const manifest = await (await fetch('manifest.json')).json();
+    const group = new THREE.Group();
+    scene.add(group);
+
+    // 表示する並び: 1 両ずつ、または編成 (先頭 + 中間 + 先頭を逆向き)
+    const views = [];
+    for (const [id, m] of Object.entries(manifest)) views.push({ label: m.name, cars: [{ id, flip: false }] });
+    for (const series of new Set(Object.keys(manifest).map(k => k.split('_')[0]))) {
+      const n = manifest[`${series}_lead`].name.replace(/（.*$/, '');
+      views.push({ label: `${n} 3 両編成`, cars: [{ id: `${series}_lead`, flip: false }, { id: `${series}_mid`, flip: false }, { id: `${series}_lead`, flip: true }] });
+    }
+
+    async function show(v, btn) {
+      document.querySelectorAll('#buttons button').forEach(b => b.setAttribute('aria-pressed', String(b === btn)));
+      group.clear();
+      let z = 0;
+      const placed = [];
+      for (const c of v.cars) {
+        const m = manifest[c.id];
+        const obj = (await load(m.file)).clone();
+        obj.rotation.y = c.flip ? Math.PI : 0;
+        obj.position.z = -(z + m.length / 2);
+        z += m.length + 0.6;
+        placed.push(obj);
+      }
+      placed.forEach(o => { o.position.z += z / 2; group.add(o); });
+      const tris = v.cars.reduce((a, c) => a + manifest[c.id].triangles, 0);
+      document.getElementById('info').textContent = `${v.label}・三角形 ${tris.toLocaleString()} 個`;
+      // 前 (+Z) の斜め上から、車両全体が収まる距離で見る
+      const span = Math.max(14, z);
+      const dir = new THREE.Vector3(0.62, 0.32, 0.72).normalize();
+      controls.target.set(0, 1.8, 0);
+      camera.position.copy(dir.multiplyScalar(span * 1.25)).add(controls.target);
+      controls.update();
+    }
+
+    const buttons = document.getElementById('buttons');
+    views.forEach((v, i) => {
+      const b = document.createElement('button');
+      b.textContent = v.label.replace('キハ261系1000番台（新塗装）', 'キハ261').replace('733系（札幌圏）', '733系');
+      b.addEventListener('click', () => show(v, b));
+      buttons.appendChild(b);
+      if (i === 0) show(v, b);
+    });
+
+    function resize() {
+      renderer.setSize(el.clientWidth, el.clientHeight);
+      camera.aspect = el.clientWidth / el.clientHeight;
+      camera.updateProjectionMatrix();
+    }
+    addEventListener('resize', resize);
+    resize();
+    renderer.setAnimationLoop(() => { controls.update(); renderer.render(scene, camera); });
+  </script>
+</body>
+</html>

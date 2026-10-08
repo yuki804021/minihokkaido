@@ -1,0 +1,26 @@
+{
+  "kiha261_lead": {
+    "file": "models/kiha261_lead.glb",
+    "name": "キハ261系1000番台（新塗装）（先頭車）",
+    "length": 21.2,
+    "triangles": 544
+  },
+  "kiha261_mid": {
+    "file": "models/kiha261_mid.glb",
+    "name": "キハ261系1000番台（新塗装）（中間車）",
+    "length": 20.8,
+    "triangles": 376
+  },
+  "ser733_lead": {
+    "file": "models/ser733_lead.glb",
+    "name": "733系（札幌圏）（先頭車）",
+    "length": 21.2,
+    "triangles": 628
+  },
+  "ser733_mid": {
+    "file": "models/ser733_mid.glb",
+    "name": "733系（札幌圏）（中間車）",
+    "length": 20.8,
+    "triangles": 448
+  }
+}
