@@ -134,7 +134,11 @@
     </div>
     <div id="info-status"></div>
     <div id="info-detail"></div>
-    <ol id="info-stops" aria-label="この先の停車駅"></ol>
+    <details id="info-past" hidden>
+      <summary>これより前の停車場</summary>
+      <ol id="info-past-stops" class="stop-list" aria-label="これより前の停車駅"></ol>
+    </details>
+    <ol id="info-stops" class="stop-list" aria-label="この先の停車駅"></ol>
     <button id="info-follow" aria-pressed="false">この列車を追跡</button>
   </div>
 
@@ -148,6 +152,7 @@
     </div>
     <dl id="station-info"></dl>
     <div id="station-board-title" class="card-kicker">発車案内（方面別）</div>
+    <div id="station-dirs" role="tablist" aria-label="方面"></div>
     <ol id="station-deps"></ol>
     <button id="station-reach">ここから行ける範囲（到達圏）を表示</button>
     <p id="station-empty" class="note" hidden>3 時間以内に発車する列車はありません。</p>

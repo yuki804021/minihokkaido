@@ -98,8 +98,8 @@ button.chip { padding: 3px 10px; border-radius: 999px; font-size: 12px; }
 #info-status { margin-top: 10px; font-weight: 500; }
 #info-detail { margin-top: 4px; color: var(--muted); font-size: 12px; }
 #info-follow { margin-top: 10px; width: 100%; }
-#info-stops { list-style: none; margin: 10px 0 0; padding: 0 0 0 4px; }
-#info-stops li {
+.stop-list { list-style: none; margin: 10px 0 0; padding: 0 0 0 4px; }
+.stop-list li {
   position: relative;
   display: grid;
   grid-template-columns: 44px 1fr;
@@ -108,14 +108,14 @@ button.chip { padding: 3px 10px; border-radius: 999px; font-size: 12px; }
   font-size: 12.5px;
 }
 /* 路線色の縦線と駅の丸で停車駅を示す */
-#info-stops li::before {
+.stop-list li::before {
   content: "";
   position: absolute;
   left: 3px; top: 0; bottom: 0;
   width: 3px;
   background: var(--route, #888);
 }
-#info-stops li::after {
+.stop-list li::after {
   content: "";
   position: absolute;
   left: 0; top: 50%;
@@ -125,11 +125,21 @@ button.chip { padding: 3px 10px; border-radius: 999px; font-size: 12px; }
   background: var(--bg);
   box-shadow: inset 0 0 0 2px var(--route, #888);
 }
-#info-stops li:first-child::before { top: 50%; }
-#info-stops li:last-child::before { bottom: 50%; }
-#info-stops li.more { color: var(--muted); }
-#info-stops li.more::after { display: none; }
+.stop-list li:first-child::before { top: 50%; }
+.stop-list li:last-child::before { bottom: 50%; }
+.stop-list li.more { color: var(--muted); }
+.stop-list li.more::after { display: none; }
 .stop-time { font-variant-numeric: tabular-nums; color: var(--muted); }
+.stop-name { cursor: pointer; text-align: left; }
+.stop-name:hover { text-decoration: underline; }
+#info-past { margin-top: 10px; font-size: 12px; }
+#info-past summary { cursor: pointer; color: var(--muted); }
+#info-past .stop-list { margin-top: 4px; opacity: 0.7; }
+#station-dirs { display: flex; flex-wrap: wrap; gap: 4px; margin: 6px 0 0; }
+#station-dirs button { font-size: 12px; padding: 4px 8px; text-align: left; line-height: 1.3; }
+#station-dirs button small { display: block; font-size: 10.5px; color: var(--muted); }
+#station-dirs button[aria-selected="true"] { background: var(--btn-on); color: var(--btn-on-fg); border-color: transparent; }
+#station-dirs button[aria-selected="true"] small { color: inherit; opacity: 0.85; }
 
 #search { width: 100%; cursor: text; }
 .card-kicker { font-size: 11px; color: var(--muted); }

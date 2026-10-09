@@ -911,6 +911,9 @@
   map.on('click', 'trains', e => onVehicleClick(e));
   function onVehicleClick(e) {
     if (e.defaultPrevented) return;
+    // 駅名・停留所名の文字は車両より手前に書かれているので、文字のクリックを優先する
+    const labels = ['labels-rail', 'labels-tram', 'bus-stop-labels'].filter(l => map.getLayer(l));
+    if (e.point && map.queryRenderedFeatures(e.point, { layers: labels }).length) return;
     const id = e.features[0].properties.id;
     // 実際の飛行機は id が live:<機体の ICAO アドレス>
     live.selected = id.startsWith('live:') ? id.slice(5) : null;
@@ -1024,6 +1027,7 @@
       if (state.selected) {
         document.getElementById('info-status').textContent = '運行を終了しました';
         document.getElementById('info-stops').replaceChildren();
+        document.getElementById('info-past').hidden = true;
         lastUpcomingKey = '';
       }
       return;
@@ -1048,6 +1052,7 @@
           : `着陸まで あと約${left}分（高度 約${alt.toLocaleString()} m）`);
       document.getElementById('info-status').textContent = status;
       document.getElementById('info-stops').replaceChildren();
+      document.getElementById('info-past').hidden = true;
       return;
     }
     const cp = tr.pattern.couple;
@@ -1074,31 +1079,48 @@
     renderUpcoming(tr);
   }
 
-  // 選択中の列車のこの先の停車駅と到着予定 (最大 6 駅 + 終着駅)
+  // 選択中の列車の停車駅: この先 (最大 6 駅 + 終着駅、到着予定) と、これより前 (発車済み、発車時刻。たたんでおく)
   let lastUpcomingKey = '';
   function renderUpcoming(tr) {
     const p = tr.pattern;
     const rows = tr.segs
       .filter(sg => sg.t1 > tr.elapsed)
-      .map(sg => [p.path[sg.to][0], formatTime(tr.dep + sg.t1).slice(0, 5)]);
+      .map(sg => ({ i: sg.to, time: formatTime(tr.dep + sg.t1).slice(0, 5) }));
+    const past = tr.segs
+      .filter(sg => sg.t0 < tr.elapsed)
+      .map(sg => ({ i: sg.from, time: `${formatTime(tr.dep + sg.t0).slice(0, 5)}` }));
     const shown = rows.length > 7 ? [...rows.slice(0, 6), null, rows[rows.length - 1]] : rows;
-    const key = tr.id + shown.map(r => (r ? r[0] : '…')).join();
+    const key = tr.id + past.length + shown.map(r => (r ? r.i : '…')).join();
     if (key === lastUpcomingKey) return;
+    // 別の列車を選んだら、「これより前の停車場」はたたみ直す
+    const pastBox = document.getElementById('info-past');
+    if (!lastUpcomingKey.startsWith(tr.id)) pastBox.open = false;
     lastUpcomingKey = key;
-    const list = document.getElementById('info-stops');
-    list.replaceChildren(...shown.map(r => {
+    const item = r => {
       const li = document.createElement('li');
       if (!r) {
         li.className = 'more';
         li.textContent = `… ほか ${rows.length - 7} 駅`;
         return li;
       }
-      li.innerHTML = '<span class="stop-time"></span><span class="stop-name"></span>';
-      li.querySelector('.stop-time').textContent = r[1];
-      li.querySelector('.stop-name').textContent = r[0];
+      const [name, c] = p.path[r.i];
+      li.innerHTML = '<span class="stop-time"></span><a class="stop-name" role="button" tabindex="0"></a>';
+      li.querySelector('.stop-time').textContent = r.time;
+      const a = li.querySelector('.stop-name');
+      a.textContent = name;
+      a.title = `${name} の情報`;
+      const open = () => openStation(name, c);
+      a.addEventListener('click', open);
+      a.addEventListener('keydown', e => { if (e.key === 'Enter') open(); });
       return li;
-    }));
+    };
+    const list = document.getElementById('info-stops');
+    list.replaceChildren(...shown.map(item));
     list.style.setProperty('--route', tr.service.color);
+    pastBox.hidden = past.length === 0;
+    const pastList = document.getElementById('info-past-stops');
+    pastList.replaceChildren(...past.map(item));
+    pastList.style.setProperty('--route', tr.service.color);
   }
 
   function renderInfo() {
@@ -1446,9 +1468,27 @@
     }
     // 4 時を 1 日の区切りとして、その日の発車をすべて数える
     const all = sim.departuresAt(name, c, 4 * 3600, { limit: Infinity, horizon: 86399 });
-    const info = { lines, count: all.length, first: all[0], last: all[all.length - 1] };
+    const info = { lines, count: all.length, first: all[0], last: all[all.length - 1], dirs: directionsOf(all) };
     stationFacts.set(key, info);
     return info;
+  }
+  // 方面: 駅を出て最初に通る駅で分ける。見出しは行き先の多い順に 2 つまで（例: 「小樽・あいの里公園 方面」）
+  function dirKey(d) { return d.toward || destinationOf(d.pattern); }
+  function directionsOf(deps) {
+    const dirs = new Map();
+    for (const d of deps) {
+      const key = dirKey(d);
+      if (!dirs.has(key)) dirs.set(key, new Map());
+      const dest = d.pattern.service.loop ? shortName(d.service) : d.pattern.destination;
+      dirs.get(key).set(dest, (dirs.get(key).get(dest) || 0) + 1);
+    }
+    return [...dirs.entries()]
+      .map(([key, n]) => ({
+        key,
+        count: [...n.values()].reduce((a, b) => a + b, 0),
+        title: `${[...n.entries()].sort((a, b) => b[1] - a[1]).slice(0, 2).map(x => x[0]).join('・')} 方面`,
+      }))
+      .sort((a, b) => b.count - a.count || a.key.localeCompare(b.key, 'ja')); // 本数の多い方面から
   }
   const KIND_LABEL = { rail: '駅', tram: '停留場', ship: '港（旅客船ターミナル）', bus: '高速バスの停留所' };
 
@@ -1486,6 +1526,7 @@
     if (state.station.bus) {
       document.getElementById('station-kicker').textContent = 'バス停';
       document.getElementById('station-board-title').textContent = '発車時刻（この先 3 時間）';
+      document.getElementById('station-dirs').hidden = true;
       renderBusStop();
       return;
     }
@@ -1500,51 +1541,47 @@
       ...(facts.count ? [['始発・最終', `${hm(facts.first)}（${destinationOf(facts.first.pattern)}）／${hm(facts.last)}（${destinationOf(facts.last.pattern)}）`]] : []),
       ['位置', `北緯 ${state.station.c[1].toFixed(4)}°・東経 ${state.station.c[0].toFixed(4)}°`],
     ]);
-    document.getElementById('station-board-title').textContent = '発車案内（方面別）';
+    document.getElementById('station-board-title').textContent = '発車案内（方面を選んで切り替え）';
 
     const t = ((simTime() % 86400) + 86400) % 86400;
     const deps = sim.departuresAt(state.station.name, state.station.c, t, {
       limit: 200, isVisible: sv => state.groups[sv.group],
     });
-    // 方面ごとにまとめる。見出しは行き先の多い順に 2 つまで（例: 「札幌・小樽 方面」）
-    const dirs = new Map();
-    for (const d of deps) {
-      const key = d.toward || destinationOf(d.pattern);
-      if (!dirs.has(key)) dirs.set(key, []);
-      dirs.get(key).push(d);
+    // 方面はタブで切り替える。最初は 1 つめの方面
+    const dirs = facts.dirs;
+    if (!dirs.some(d => d.key === state.station.dir)) state.station.dir = dirs.length ? dirs[0].key : null;
+    const tabs = document.getElementById('station-dirs');
+    const tabKey = `${state.station.name}|${state.station.dir}|${dirs.map(d => d.key).join()}`;
+    if (tabs.dataset.key !== tabKey) {
+      tabs.dataset.key = tabKey;
+      tabs.replaceChildren(...dirs.map(d => {
+        const b = document.createElement('button');
+        b.setAttribute('role', 'tab');
+        b.setAttribute('aria-selected', String(d.key === state.station.dir));
+        b.innerHTML = '<span></span><small></small>';
+        b.querySelector('span').textContent = d.title;
+        b.querySelector('small').textContent = `次は ${d.key}`;
+        b.addEventListener('click', () => { state.station.dir = d.key; renderStation(); });
+        return b;
+      }));
     }
-    const PER_DIR = 4;
-    const groups = [...dirs.entries()].map(([toward, list]) => {
-      const n = new Map();
-      for (const d of list) {
-        const dest = d.pattern.service.loop ? shortName(d.service) : d.pattern.destination;
-        n.set(dest, (n.get(dest) || 0) + 1);
-      }
-      const heads = [...n.entries()].sort((a, b) => b[1] - a[1]).slice(0, 2).map(x => x[0]);
-      return { toward, list, title: `${heads.join('・')} 方面（次は ${toward}）` };
-    });
-    // 並びが毎秒入れ替わらないよう、次の駅の名前順にする
-    groups.sort((a, b) => a.toward.localeCompare(b.toward, 'ja'));
+    tabs.hidden = dirs.length < 2;
+    const shown = deps.filter(d => dirKey(d) === state.station.dir).slice(0, 8);
     const list = document.getElementById('station-deps');
-    list.replaceChildren(...groups.flatMap(g => {
-      const head = document.createElement('li');
-      head.className = 'dep-dir';
-      head.textContent = g.title;
-      return [head, ...g.list.slice(0, PER_DIR).map(d => {
-        const li = document.createElement('li');
-        const min = Math.floor(d.wait / 60);
-        li.innerHTML = `<span class="dep-time">${formatTime(d.time).slice(0, 5)}</span>
-          <i class="dep-swatch"></i>
-          <span class="dep-name"></span>
-          <span class="dep-wait">${min === 0 ? 'まもなく' : `${min}分後`}</span>`;
-        li.querySelector('.dep-swatch').style.background = d.service.color;
-        li.querySelector('.dep-name').textContent =
-          `${shortName(d.service)} ${destinationOf(d.pattern)}${d.first ? '（始発）' : ''}`;
-        return li;
-      })];
+    list.replaceChildren(...shown.map(d => {
+      const li = document.createElement('li');
+      const min = Math.floor(d.wait / 60);
+      li.innerHTML = `<span class="dep-time">${formatTime(d.time).slice(0, 5)}</span>
+        <i class="dep-swatch"></i>
+        <span class="dep-name"></span>
+        <span class="dep-wait">${min === 0 ? 'まもなく' : `${min}分後`}</span>`;
+      li.querySelector('.dep-swatch').style.background = d.service.color;
+      li.querySelector('.dep-name').textContent =
+        `${shortName(d.service)} ${destinationOf(d.pattern)}${d.first ? '（始発）' : ''}`;
+      return li;
     }));
-    document.getElementById('station-empty').textContent = '3 時間以内に発車する列車はありません。';
-    document.getElementById('station-empty').hidden = deps.length > 0;
+    document.getElementById('station-empty').textContent = dirs.length > 1 ? 'この方面に 3 時間以内に発車する列車はありません。' : '3 時間以内に発車する列車はありません。';
+    document.getElementById('station-empty').hidden = shown.length > 0;
     // 時刻の出どころ (時刻表データか推計か) を明記する
     const real = deps.filter(d => d.pattern.tripSegs).length;
     document.getElementById('station-source').textContent =
@@ -1552,6 +1589,7 @@
         : real > 0 ? '発車時刻は時刻表データ（GTFS）と運行パターンからの推計の混在です。'
           : '発車時刻は運行パターンからの推計です。';
   }
+
 
   document.getElementById('station-close').addEventListener('click', () => {
     state.station = null;
@@ -1941,6 +1979,7 @@
     document.getElementById('info-detail').textContent =
       `実際の飛行機（ADS-B、${live.source}）・ ${Math.round(p.age)} 秒前の受信位置から推定` + (a.desc ? ` ・ ${a.desc}` : '');
     document.getElementById('info-stops').replaceChildren();
+    document.getElementById('info-past').hidden = true;
     const followBtn = document.getElementById('info-follow');
     followBtn.textContent = state.follow ? '追跡をやめる' : 'この飛行機を追跡';
     followBtn.setAttribute('aria-pressed', String(state.follow));
