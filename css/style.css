@@ -135,11 +135,20 @@ button.chip { padding: 3px 10px; border-radius: 999px; font-size: 12px; }
 #info-past { margin-top: 10px; font-size: 12px; }
 #info-past summary { cursor: pointer; color: var(--muted); }
 #info-past .stop-list { margin-top: 4px; opacity: 0.7; }
-#station-dirs { display: flex; flex-wrap: wrap; gap: 4px; margin: 6px 0 0; }
-#station-dirs button { font-size: 12px; padding: 4px 8px; text-align: left; line-height: 1.3; }
-#station-dirs button small { display: block; font-size: 10.5px; color: var(--muted); }
-#station-dirs button[aria-selected="true"] { background: var(--btn-on); color: var(--btn-on-fg); border-color: transparent; }
-#station-dirs button[aria-selected="true"] small { color: inherit; opacity: 0.85; }
+#station-dirs-wrap { display: flex; align-items: stretch; gap: 4px; margin: 6px 0 0; }
+#station-dirs-wrap[hidden] { display: none; }
+/* 方面は横 1 列に並べ、入りきらないときは ◀ ▶ で横に送る */
+#station-dirs { flex: 1; min-width: 0; display: flex; gap: 4px; overflow-x: auto; scroll-behavior: smooth; scrollbar-width: none; }
+#station-dirs::-webkit-scrollbar { display: none; }
+#station-dirs button { flex: none; white-space: nowrap; font-size: 12px; padding: 4px 8px; text-align: left; line-height: 1.3;
+  background: var(--btn-on); color: var(--btn-on-fg); border-color: transparent; }
+#station-dirs button small { display: block; font-size: 10.5px; opacity: 0.85; }
+/* 表示中の方面は明るく、ほかは少し暗く */
+#station-dirs button[aria-selected="false"] { opacity: 0.5; filter: saturate(0.4) brightness(0.8); }
+#station-dirs button[aria-selected="false"]:hover { opacity: 0.75; }
+.dir-scroll { flex: none; padding: 0 6px; font-size: 11px; }
+.dir-scroll[hidden] { display: none; }
+.dir-scroll:disabled { opacity: 0.3; cursor: default; }
 
 #search { width: 100%; cursor: text; }
 .card-kicker { font-size: 11px; color: var(--muted); }
@@ -151,8 +160,9 @@ button.chip { padding: 3px 10px; border-radius: 999px; font-size: 12px; }
 .line-chip { display: inline-flex; align-items: center; gap: 4px; margin-right: 8px; white-space: nowrap; }
 .line-chip i { width: 10px; height: 4px; border-radius: 2px; }
 #station-board-title { margin-top: 12px; }
-#station-deps { list-style: none; margin: 4px 0 0; padding: 0; }
-#station-deps li.dep-dir { display: block; padding: 8px 0 2px; border-top: none; font-size: 12px; font-weight: 600; color: var(--muted); }
+#station-deps { list-style: none; margin: 6px 0 0; padding: 0; position: relative; max-height: 280px; overflow-y: auto; overscroll-behavior: contain; }
+#station-deps li.past { opacity: 0.5; }
+#station-deps li.dep-now { display: block; padding: 2px 0; border-top: 2px solid var(--accent); font-size: 10.5px; color: var(--accent); text-align: center; }
 #station-deps li {
   display: grid;
   grid-template-columns: 44px 6px 1fr auto;

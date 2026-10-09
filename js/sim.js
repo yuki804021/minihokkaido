@@ -353,15 +353,19 @@
           const st = p.path[from];
           if (st[0] !== name || haversine(st[1], c) > radius) continue;
           // 方面: この駅を出て最初に通る駅 (通過駅を含む)。同じ駅へ向かう列車は同じ方面
-          let toward = '';
+          // 同じ名前でも路線ごとに別の駅 (例: 南北線と東豊線のさっぽろ) は、位置で区別する (towardKey)
+          let toward = '', towardKey = '';
           for (let i = from + 1; i < p.path.length && !toward; i++) {
-            if (p.path[i][0] && p.path[i][0] !== name) toward = p.path[i][0];
+            if (p.path[i][0] && p.path[i][0] !== name) {
+              toward = p.path[i][0];
+              towardKey = `${toward}@${p.path[i][1].map(x => x.toFixed(3)).join(',')}`;
+            }
           }
           p.departures.forEach((dep, di) => {
             const time = dep + p.segsOf(di)[k].t0;
             const wait = ((time - t) % 86400 + 86400) % 86400;
             if (wait > horizon) return;
-            out.push({ pattern: p, service: p.service, time: time % 86400, wait, first: from === 0, toward });
+            out.push({ pattern: p, service: p.service, time: time % 86400, wait, first: from === 0, toward, towardKey });
           });
         }
       }

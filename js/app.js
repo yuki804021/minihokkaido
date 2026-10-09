@@ -254,8 +254,9 @@
       map.addLayer({
         id: `stations-${kind}`, type: 'circle', source: 'stations',
         minzoom: kind === 'rail' ? 0 : 12.5,
+        layout: { 'circle-sort-key': ['case', hoverIs('station', 'k'), 1, 0] },
         paint: {
-          'circle-radius': ['interpolate', ['linear'], ['zoom'], 8, 1.5, 12, 3, 16, 6],
+          'circle-radius': stationRadius(),
           'circle-color': dark ? '#1b1f27' : '#ffffff',
           'circle-stroke-color': ['get', 'color'],
           'circle-stroke-width': ['interpolate', ['linear'], ['zoom'], 8, 1, 16, 2.5],
@@ -269,8 +270,9 @@
     map.addSource('bus-stops', { type: 'geojson', data: busStopsGeoJSON() });
     map.addLayer({
       id: 'bus-stops', type: 'circle', source: 'bus-stops', minzoom: 13,
+      layout: { 'circle-sort-key': ['case', hoverIs('bus', 'i'), 1, 0] },
       paint: {
-        'circle-radius': ['interpolate', ['linear'], ['zoom'], 13, 2, 16, 5],
+        'circle-radius': busStopRadius(),
         'circle-color': dark ? '#1b1f27' : '#ffffff',
         'circle-stroke-color': BUS_COLOR,
         'circle-stroke-width': ['interpolate', ['linear'], ['zoom'], 13, 1, 16, 2],
@@ -292,6 +294,32 @@
         'text-halo-color': dark ? '#0b0e13' : '#ffffff',
         'text-halo-width': 1.2,
       },
+    });
+    // 情報を見ている駅・停留所の印 (橙の輪と、大きめの駅名)
+    map.addSource('station-focus', { type: 'geojson', data: stationFocusData() });
+    map.addLayer({
+      id: 'station-focus-halo', type: 'circle', source: 'station-focus',
+      paint: {
+        'circle-radius': ['interpolate', ['linear'], ['zoom'], 8, 10, 16, 22],
+        'circle-color': '#f08300', 'circle-opacity': 0.22, 'circle-blur': 0.4,
+        'circle-pitch-alignment': 'map',
+      },
+    });
+    map.addLayer({
+      id: 'station-focus-ring', type: 'circle', source: 'station-focus',
+      paint: {
+        'circle-radius': ['interpolate', ['linear'], ['zoom'], 8, 5, 16, 11],
+        'circle-opacity': 0, 'circle-stroke-color': '#f08300', 'circle-stroke-width': 3,
+        'circle-pitch-alignment': 'map',
+      },
+    });
+    map.addLayer({
+      id: 'station-focus-label', type: 'symbol', source: 'station-focus',
+      layout: {
+        'text-field': ['get', 'name'], 'text-font': ['Noto Sans Bold'], 'text-size': 15,
+        'text-anchor': 'bottom', 'text-offset': [0, -1.3], 'text-allow-overlap': true, 'text-ignore-placement': true,
+      },
+      paint: { 'text-color': dark ? '#ffb45c' : '#b35c00', 'text-halo-color': dark ? '#0b0e13' : '#ffffff', 'text-halo-width': 2 },
     });
     map.addSource('station-label-data', { type: 'geojson', data: stationsGeoJSON() });
     for (const kind of ['rail', 'tram']) {
@@ -436,14 +464,24 @@
 
   function empty() { return { type: 'FeatureCollection', features: [] }; }
 
-  // 丸で描いた車両のうち、カーソルを近づけたもの
+  // カーソルを近づけた車両の丸・駅・停留所 ({ kind: 'train' | 'station' | 'bus', id })。直径を HOVER_SCALE 倍にする
   const HOVER_PX = 14, HOVER_SCALE = 2;
-  let hoveredId = null;
+  let hovered = null;
   let hoverQueued = false;
-  function hoverMatch() { return ['==', ['get', 'id'], hoveredId || '']; }
-  function hoverRadius() {
-    const r = v => ['case', hoverMatch(), v * HOVER_SCALE, v];
-    return ['interpolate', ['linear'], ['zoom'], 6, r(2.5), 10, r(3.5), 14, r(5.5)];
+  function hoverIs(kind, prop) {
+    return ['==', ['to-string', ['get', prop]], hovered && hovered.kind === kind ? String(hovered.id) : '\u0000'];
+  }
+  function hoverMatch() { return hoverIs('train', 'id'); }
+  function zoomRadius(kind, prop, stops) {
+    const r = v => ['case', hoverIs(kind, prop), v * HOVER_SCALE, v];
+    return ['interpolate', ['linear'], ['zoom'], ...stops.flatMap(([z, v]) => [z, r(v)])];
+  }
+  function hoverRadius() { return zoomRadius('train', 'id', [[6, 2.5], [10, 3.5], [14, 5.5]]); }
+  function stationRadius() { return zoomRadius('station', 'k', [[8, 1.5], [12, 3], [16, 6]]); }
+  function busStopRadius() { return zoomRadius('bus', 'i', [[13, 2], [16, 5]]); }
+  function stationFocusData() {
+    const st = state.station;
+    return st ? { type: 'Feature', properties: { name: st.name }, geometry: { type: 'Point', coordinates: st.c } } : empty();
   }
 
   function tracksGeoJSON() {
@@ -502,7 +540,7 @@
         }
         seen.set(key, {
           type: 'Feature',
-          properties: { name, color: l.color, kind: l.kind, groups: `,${l.group},` },
+          properties: { name, k: `${name}|${c.join()}`, color: l.color, kind: l.kind, groups: `,${l.group},` },
           geometry: { type: 'Point', coordinates: c },
         });
       }
@@ -879,34 +917,46 @@
 
   // ---------------------------------------------------------------- 列車の選択
   map.on('click', 'train-points', e => onVehicleClick(e));
-  // 丸で描いた車両は、カーソルを近づける (HOVER_PX 以内) と直径を HOVER_SCALE 倍にする
+  // 車両の丸・駅・停留所は、カーソルを近づける (HOVER_PX 以内) と直径を HOVER_SCALE 倍にする
   map.on('mousemove', e => {
     if (hoverQueued) return;
     hoverQueued = true;
     requestAnimationFrame(() => {
       hoverQueued = false;
-      setHover(nearestPoint(e.point));
+      setHover(nearestTarget(e.point));
     });
   });
   map.getCanvas().addEventListener('mouseleave', () => setHover(null));
-  function nearestPoint(pt) {
-    if (drawMode !== 'points' || !map.getLayer('train-points')) return null;
+  const HOVER_LAYERS = { 'train-points': ['train', 'id'], 'stations-rail': ['station', 'k'], 'stations-tram': ['station', 'k'], 'bus-stops': ['bus', 'i'] };
+  function nearestTarget(pt) {
+    const layers = Object.keys(HOVER_LAYERS).filter(l => map.getLayer(l) && (l !== 'train-points' || drawMode === 'points'));
+    if (!layers.length) return null;
     const r = HOVER_PX;
     let best = null, bestD = Infinity;
-    for (const f of map.queryRenderedFeatures([[pt.x - r, pt.y - r], [pt.x + r, pt.y + r]], { layers: ['train-points'] })) {
+    for (const f of map.queryRenderedFeatures([[pt.x - r, pt.y - r], [pt.x + r, pt.y + r]], { layers })) {
       const p = map.project(f.geometry.coordinates);
       const d = Math.hypot(p.x - pt.x, p.y - pt.y);
-      if (d <= r && d < bestD) { best = f.properties.id; bestD = d; }
+      if (d > r || d >= bestD) continue;
+      const [kind, prop] = HOVER_LAYERS[f.layer.id];
+      best = { kind, id: f.properties[prop], f };
+      bestD = d;
     }
     return best;
   }
-  function setHover(id) {
-    if (id === hoveredId) return;
-    hoveredId = id;
-    map.getCanvas().style.cursor = id ? 'pointer' : '';
-    if (!map.getLayer('train-points')) return;
-    map.setPaintProperty('train-points', 'circle-radius', hoverRadius());
-    map.setLayoutProperty('train-points', 'circle-sort-key', ['case', hoverMatch(), 1, 0]);
+  function setHover(t) {
+    const key = h => (h ? `${h.kind}:${h.id}` : '');
+    if (key(t) === key(hovered)) return;
+    hovered = t;
+    map.getCanvas().style.cursor = t ? 'pointer' : '';
+    const set = (layer, radius, kind, prop) => {
+      if (!map.getLayer(layer)) return;
+      map.setPaintProperty(layer, 'circle-radius', radius);
+      map.setLayoutProperty(layer, 'circle-sort-key', ['case', hoverIs(kind, prop), 1, 0]);
+    };
+    set('train-points', hoverRadius(), 'train', 'id');
+    set('stations-rail', stationRadius(), 'station', 'k');
+    set('stations-tram', stationRadius(), 'station', 'k');
+    set('bus-stops', busStopRadius(), 'bus', 'i');
   }
   map.on('click', 'trains', e => onVehicleClick(e));
   function onVehicleClick(e) {
@@ -1001,9 +1051,17 @@
   }
   map.on('click', e => {
     if (e.defaultPrevented) return;
-    const near = nearestPoint(e.point);
-    if (near) {
-      onVehicleClick({ features: [{ properties: { id: near } }], defaultPrevented: false, preventDefault() {} });
+    const near = nearestTarget(e.point);
+    if (near && near.kind === 'train') {
+      onVehicleClick({ features: [{ properties: { id: near.id } }], defaultPrevented: false, preventDefault() {} });
+      return;
+    }
+    if (near && near.kind === 'station') {
+      openStation(near.f.properties.name, near.f.geometry.coordinates);
+      return;
+    }
+    if (near && near.kind === 'bus') {
+      openBusStop(near.id);
       return;
     }
     state.selected = null;
@@ -1446,9 +1504,15 @@
     return p.service.loop ? p.service.name.replace(/^\d+系統\s*/, '') : `${p.destination} 行`;
   }
 
-  function openStation(name, c) {
+  // 駅・停留所の情報を開くときは、その場所へ移動する (カードに隠れないよう少し左に寄せる)
+  function flyToStop(c, zoom) {
+    const wide = window.innerWidth > 700;
+    map.flyTo({ center: c, zoom: Math.max(map.getZoom(), zoom), offset: wide ? [-150, 0] : [0, -100], duration: 1200, essential: true });
+  }
+  function openStation(name, c, { fly = true } = {}) {
     state.airport = null;
     renderAirport();
+    if (fly) flyToStop(c, 14);
     state.station = { name, c };
     state.selected = null;
     state.follow = false;
@@ -1456,7 +1520,7 @@
     renderStation();
   }
 
-  // 駅の情報: 種別・乗り入れる路線・1 日の発車本数と始発・最終 (駅ごとに覚えておく)
+  // 駅の情報: 乗り入れる路線と方面 (駅ごとに覚えておく)
   const stationFacts = new Map();
   function stationInfo(name, c) {
     const key = `${sim.dayType}|${name}|${c.join()}`;
@@ -1466,25 +1530,28 @@
       if (!l.stations.some(([n, sc]) => n === name && Sim.haversine(sc, c) < 400)) continue;
       if (!lines.some(x => x.name === l.name)) lines.push(l);
     }
-    // 4 時を 1 日の区切りとして、その日の発車をすべて数える
+    // 方面は、4 時を 1 日の区切りとして、その日の発車すべてから決める
     const all = sim.departuresAt(name, c, 4 * 3600, { limit: Infinity, horizon: 86399 });
-    const info = { lines, count: all.length, first: all[0], last: all[all.length - 1], dirs: directionsOf(all) };
+    const info = { lines, dirs: directionsOf(all) };
     stationFacts.set(key, info);
     return info;
   }
   // 方面: 駅を出て最初に通る駅で分ける。見出しは行き先の多い順に 2 つまで（例: 「小樽・あいの里公園 方面」）
-  function dirKey(d) { return d.toward || destinationOf(d.pattern); }
+  function dirKey(d) { return d.towardKey || destinationOf(d.pattern); }
   function directionsOf(deps) {
     const dirs = new Map();
+    const names = new Map(); // 方面の key → 次の駅の名前
     for (const d of deps) {
       const key = dirKey(d);
       if (!dirs.has(key)) dirs.set(key, new Map());
+      names.set(key, d.toward || key);
       const dest = d.pattern.service.loop ? shortName(d.service) : d.pattern.destination;
       dirs.get(key).set(dest, (dirs.get(key).get(dest) || 0) + 1);
     }
     return [...dirs.entries()]
       .map(([key, n]) => ({
         key,
+        next: names.get(key),
         count: [...n.values()].reduce((a, b) => a + b, 0),
         title: `${[...n.entries()].sort((a, b) => b[1] - a[1]).slice(0, 2).map(x => x[0]).join('・')} 方面`,
       }))
@@ -1516,6 +1583,7 @@
 
   function renderStation() {
     const box = document.getElementById('station');
+    if (map.getSource('station-focus')) map.getSource('station-focus').setData(stationFocusData());
     if (!state.station) {
       box.hidden = true;
       return;
@@ -1526,62 +1594,56 @@
     if (state.station.bus) {
       document.getElementById('station-kicker').textContent = 'バス停';
       document.getElementById('station-board-title').textContent = '発車時刻（この先 3 時間）';
-      document.getElementById('station-dirs').hidden = true;
+      document.getElementById('station-dirs-wrap').hidden = true;
+      document.getElementById('station-deps').dataset.key = '';
       renderBusStop();
       return;
     }
     const facts = stationInfo(state.station.name, state.station.c);
     const kind = facts.lines.length ? facts.lines[0].kind : 'rail';
     document.getElementById('station-kicker').textContent = KIND_LABEL[kind] || '駅';
-    const hm = d => formatTime(d.time).slice(0, 5);
-    const day = sim.dayType === 'holiday' ? '土休日' : '平日';
-    renderStationInfo([
-      ['路線', facts.lines.map(lineChip)],
-      ['発車本数', facts.count ? `${day} 1 日 ${facts.count} 本` : '発車する便はありません'],
-      ...(facts.count ? [['始発・最終', `${hm(facts.first)}（${destinationOf(facts.first.pattern)}）／${hm(facts.last)}（${destinationOf(facts.last.pattern)}）`]] : []),
-      ['位置', `北緯 ${state.station.c[1].toFixed(4)}°・東経 ${state.station.c[0].toFixed(4)}°`],
-    ]);
-    document.getElementById('station-board-title').textContent = '発車案内（方面を選んで切り替え）';
+    renderStationInfo([['路線', facts.lines.map(lineChip)]]);
+    document.getElementById('station-board-title').textContent = '発車案内（上へスクロールで発車済み）';
 
-    const t = ((simTime() % 86400) + 86400) % 86400;
-    const deps = sim.departuresAt(state.station.name, state.station.c, t, {
-      limit: 200, isVisible: sv => state.groups[sv.group],
-    });
-    // 方面はタブで切り替える。最初は 1 つめの方面
+    // 方面はタブで切り替える。最初は本数の多い方面
     const dirs = facts.dirs;
     if (!dirs.some(d => d.key === state.station.dir)) state.station.dir = dirs.length ? dirs[0].key : null;
-    const tabs = document.getElementById('station-dirs');
-    const tabKey = `${state.station.name}|${state.station.dir}|${dirs.map(d => d.key).join()}`;
-    if (tabs.dataset.key !== tabKey) {
-      tabs.dataset.key = tabKey;
-      tabs.replaceChildren(...dirs.map(d => {
-        const b = document.createElement('button');
-        b.setAttribute('role', 'tab');
-        b.setAttribute('aria-selected', String(d.key === state.station.dir));
-        b.innerHTML = '<span></span><small></small>';
-        b.querySelector('span').textContent = d.title;
-        b.querySelector('small').textContent = `次は ${d.key}`;
-        b.addEventListener('click', () => { state.station.dir = d.key; renderStation(); });
-        return b;
-      }));
-    }
-    tabs.hidden = dirs.length < 2;
-    const shown = deps.filter(d => dirKey(d) === state.station.dir).slice(0, 8);
+    renderDirTabs(dirs);
+
+    // 発車案内: その日 (4 時から) の発車済みと、この先 3 時間の発車。最初は「これから」の先頭を上にそろえる
+    const t = ((simTime() % 86400) + 86400) % 86400;
     const list = document.getElementById('station-deps');
-    list.replaceChildren(...shown.map(d => {
+    const boardKey = [state.station.name, state.station.c.join(), state.station.dir, Math.floor(t / 60), sim.dayType, JSON.stringify(state.groups)].join('|');
+    if (list.dataset.key === boardKey) return;
+    list.dataset.key = boardKey;
+    const vis = sv => state.groups[sv.group];
+    const back = Math.floor(((t - 4 * 3600) % 86400 + 86400) % 86400);
+    const inDir = d => dirKey(d) === state.station.dir;
+    const past = back > 0
+      ? sim.departuresAt(state.station.name, state.station.c, t - back, { limit: Infinity, horizon: back - 1, isVisible: vis }).filter(inDir) : [];
+    const deps = sim.departuresAt(state.station.name, state.station.c, t, { limit: Infinity, isVisible: vis });
+    const future = deps.filter(inDir);
+    const row = (d, isPast) => {
       const li = document.createElement('li');
+      if (isPast) li.className = 'past';
       const min = Math.floor(d.wait / 60);
       li.innerHTML = `<span class="dep-time">${formatTime(d.time).slice(0, 5)}</span>
         <i class="dep-swatch"></i>
         <span class="dep-name"></span>
-        <span class="dep-wait">${min === 0 ? 'まもなく' : `${min}分後`}</span>`;
+        <span class="dep-wait">${isPast ? '発車済' : min === 0 ? 'まもなく' : `${min}分後`}</span>`;
       li.querySelector('.dep-swatch').style.background = d.service.color;
       li.querySelector('.dep-name').textContent =
         `${shortName(d.service)} ${destinationOf(d.pattern)}${d.first ? '（始発）' : ''}`;
       return li;
-    }));
+    };
+    const nowLine = document.createElement('li');
+    nowLine.className = 'dep-now';
+    nowLine.textContent = `▲ 発車済み　${formatTime(t).slice(0, 5)}　これから ▼`;
+    const keepTop = state.station.scrolled ? list.scrollTop : null;
+    list.replaceChildren(...past.map(d => row(d, true)), ...(past.length ? [nowLine] : []), ...future.map(d => row(d, false)));
+    list.scrollTop = keepTop !== null ? keepTop : (past.length ? nowLine.offsetTop : 0);
     document.getElementById('station-empty').textContent = dirs.length > 1 ? 'この方面に 3 時間以内に発車する列車はありません。' : '3 時間以内に発車する列車はありません。';
-    document.getElementById('station-empty').hidden = shown.length > 0;
+    document.getElementById('station-empty').hidden = future.length > 0;
     // 時刻の出どころ (時刻表データか推計か) を明記する
     const real = deps.filter(d => d.pattern.tripSegs).length;
     document.getElementById('station-source').textContent =
@@ -1589,6 +1651,53 @@
         : real > 0 ? '発車時刻は時刻表データ（GTFS）と運行パターンからの推計の混在です。'
           : '発車時刻は運行パターンからの推計です。';
   }
+
+  // 方面のタブ (横 1 列。入りきらないときは ◀ ▶ で送る)
+  const dirTabs = document.getElementById('station-dirs');
+  function renderDirTabs(dirs) {
+    const wrap = document.getElementById('station-dirs-wrap');
+    wrap.hidden = dirs.length < 2;
+    const tabKey = `${state.station.name}|${state.station.c.join()}|${dirs.map(d => d.key).join()}`;
+    if (dirTabs.dataset.key !== tabKey) {
+      dirTabs.dataset.key = tabKey;
+      dirTabs.scrollLeft = 0;
+      dirTabs.replaceChildren(...dirs.map(d => {
+        const b = document.createElement('button');
+        b.setAttribute('role', 'tab');
+        b.dataset.dir = d.key;
+        b.innerHTML = '<span></span><small></small>';
+        b.querySelector('span').textContent = d.title;
+        b.querySelector('small').textContent = `次は ${d.next}`;
+        b.addEventListener('click', () => {
+          state.station.dir = d.key;
+          state.station.scrolled = false;
+          renderStation();
+          b.scrollIntoView({ block: 'nearest', inline: 'nearest' });
+        });
+        return b;
+      }));
+    }
+    for (const b of dirTabs.children) b.setAttribute('aria-selected', String(b.dataset.dir === state.station.dir));
+    updateDirArrows();
+  }
+  function updateDirArrows() {
+    const over = dirTabs.scrollWidth > dirTabs.clientWidth + 1;
+    for (const b of document.querySelectorAll('.dir-scroll')) {
+      b.hidden = !over;
+      const step = Number(b.dataset.step);
+      b.disabled = step < 0 ? dirTabs.scrollLeft <= 0 : dirTabs.scrollLeft + dirTabs.clientWidth >= dirTabs.scrollWidth - 1;
+    }
+  }
+  dirTabs.addEventListener('scroll', updateDirArrows);
+  addEventListener('resize', updateDirArrows);
+  for (const b of document.querySelectorAll('.dir-scroll')) {
+    b.addEventListener('click', () => dirTabs.scrollBy({ left: Number(b.dataset.step) * dirTabs.clientWidth * 0.7 }));
+  }
+  // 発車案内を自分でスクロールしたら、毎分の更新でも位置を保つ
+  for (const ev of ['wheel', 'touchmove', 'keydown', 'pointerdown']) {
+    document.getElementById('station-deps').addEventListener(ev, () => { if (state.station) state.station.scrolled = true; }, { passive: true });
+  }
+
 
 
   document.getElementById('station-close').addEventListener('click', () => {
@@ -1691,7 +1800,7 @@
     state.follow = false;
     map.flyTo({ center: st.c, zoom: st.kind === 'tram' ? 16.3 : st.airport ? 12.5 : 15.3, pitch: 60, duration: 2000, essential: true });
     if (st.airport) openAirport(st.airport);
-    else openStation(st.name, st.c);
+    else openStation(st.name, st.c, { fly: false });
     e.target.blur();
   });
 
@@ -2088,6 +2197,7 @@
     state.follow = false;
     renderInfo();
     const tt = busTimetableStops(name, c);
+    flyToStop(c, 16);
     state.station = { name, c, bus: { ops: ops.map(o => BUS.operators[o]), routes: routes.map(r => BUS.routeNames[r]), tt } };
     renderStation();
     Promise.all(tt.map(([, , k]) => loadBusTable(k))).then(() => { if (state.station && state.station.name === name) renderStation(); });
@@ -2133,9 +2243,8 @@
     empty.textContent = b.tt.length ? '3 時間以内に発車するバスはありません。' : 'この停留所の時刻表データはありません。';
     const day = { 1: '平日', 2: '土曜', 4: '日祝' }[bit];
     renderStationInfo([
-      ['事業者', b.ops.join('・') || '不明'],
       ...(b.routes.length ? [['路線', `${b.routes.slice(0, 8).join('、')}${b.routes.length > 8 ? ` ほか ${b.routes.length - 8}` : ''}`]] : []),
-      ['位置', `北緯 ${state.station.c[1].toFixed(4)}°・東経 ${state.station.c[0].toFixed(4)}°`],
+      ['事業者', b.ops.join('・') || '不明'],
     ]);
     document.getElementById('station-source').textContent = loading ? '時刻表を読み込み中…'
       : `${b.tt.length ? `発車時刻は事業者の時刻表データ（GTFS、${day}のダイヤ）です。` : ''}路線バスは地図上では動きません。`;
