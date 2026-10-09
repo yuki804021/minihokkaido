@@ -134,7 +134,15 @@ button.chip { padding: 3px 10px; border-radius: 999px; font-size: 12px; }
 #search { width: 100%; cursor: text; }
 .card-kicker { font-size: 11px; color: var(--muted); }
 #station-name { font-weight: 600; font-size: 17px; }
-#station-deps { list-style: none; margin: 10px 0 0; padding: 0; }
+#station { max-height: calc(100vh - 160px); overflow-y: auto; }
+#station-info { display: grid; grid-template-columns: auto 1fr; gap: 3px 10px; margin: 8px 0 0; font-size: 12px; }
+#station-info dt { color: var(--muted); }
+#station-info dd { margin: 0; min-width: 0; }
+.line-chip { display: inline-flex; align-items: center; gap: 4px; margin-right: 8px; white-space: nowrap; }
+.line-chip i { width: 10px; height: 4px; border-radius: 2px; }
+#station-board-title { margin-top: 12px; }
+#station-deps { list-style: none; margin: 4px 0 0; padding: 0; }
+#station-deps li.dep-dir { display: block; padding: 8px 0 2px; border-top: none; font-size: 12px; font-weight: 600; color: var(--muted); }
 #station-deps li {
   display: grid;
   grid-template-columns: 44px 6px 1fr auto;
